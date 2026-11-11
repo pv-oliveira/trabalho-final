@@ -80,6 +80,29 @@
     .acoes { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin-top: 1rem; }
     .total { margin-left: auto; color: var(--suave); }
     .sucesso { color: var(--sucesso); font-size: 0.9rem; min-height: 1.2em; margin-top: 0.75rem; }
+    .tabela-rolagem { overflow-x: auto; margin-top: 1rem; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+    th, td { padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--borda); text-align: left; white-space: nowrap; }
+    th { color: var(--suave); font-weight: 600; }
+    td.numero, th.numero { text-align: right; }
+    th.selecao, td.selecao { width: 2rem; }
+    th button.ordenar {
+      background: none; color: inherit; font: inherit; padding: 0; border-radius: 0;
+      display: inline-flex; gap: 0.25rem; align-items: center;
+    }
+    th button.ordenar:hover { background: none; color: var(--texto); }
+    th[aria-sort="ascending"] button.ordenar, th[aria-sort="descending"] button.ordenar { color: var(--texto); }
+    .seta { font-size: 0.75rem; min-width: 0.75rem; }
+    tbody tr.selecionada { background: #eef3ff; }
+    tbody tr:hover { background: #f8f9fb; }
+    tbody tr.selecionada:hover { background: #e3ebff; }
+    td.vazio { text-align: center; color: var(--suave); padding: 1.5rem; }
+    button.pequeno { padding: 0.25rem 0.6rem; font-size: 0.85rem; }
+    button.perigo { background: var(--perigo); }
+    button.perigo:hover { background: #991b1b; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .paginacao { display: flex; gap: 0.75rem; align-items: center; justify-content: flex-end; margin-top: 1rem; }
+    .paginacao span { color: var(--suave); font-size: 0.9rem; }
   </style>
 </head>
 <body>
@@ -111,7 +134,7 @@
       <div class="cartao">
         <h2 style="margin-top:0">Página inicial</h2>
         <p>Bem-vindo(a), <strong id="nome-boas-vindas"></strong>.</p>
-        <p class="situacao">Listagem, busca, exportação e dashboard serão adicionados nas próximas issues.</p>
+        <p class="situacao">Busca, exportação e dashboard serão adicionados nas próximas issues.</p>
       </div>
 
       <div class="cartao" id="cartao-venda">
@@ -158,6 +181,37 @@
           <div id="erro-venda" class="erro" role="alert"></div>
           <div id="sucesso-venda" class="sucesso" role="status"></div>
         </form>
+      </div>
+
+      <div class="cartao" id="cartao-listagem">
+        <div class="cabecalho-cartao">
+          <h2>Vendas cadastradas</h2>
+          <button type="button" id="excluir-selecionadas" class="perigo" disabled>Excluir selecionadas</button>
+        </div>
+        <div class="tabela-rolagem">
+          <table id="tabela-vendas">
+            <thead>
+              <tr>
+                <th class="selecao"><input type="checkbox" id="selecionar-todas" aria-label="Selecionar todas as vendas da página"></th>
+                <th data-coluna="id" class="numero"><button type="button" class="ordenar">Nº <span class="seta"></span></button></th>
+                <th data-coluna="data_venda"><button type="button" class="ordenar">Data <span class="seta"></span></button></th>
+                <th data-coluna="produto_nome"><button type="button" class="ordenar">Produto <span class="seta"></span></button></th>
+                <th data-coluna="categoria"><button type="button" class="ordenar">Categoria <span class="seta"></span></button></th>
+                <th data-coluna="quantidade" class="numero"><button type="button" class="ordenar">Qtd. <span class="seta"></span></button></th>
+                <th data-coluna="valor_total" class="numero"><button type="button" class="ordenar">Valor total <span class="seta"></span></button></th>
+                <th><span class="oculto">Ações</span></th>
+              </tr>
+            </thead>
+            <tbody id="corpo-tabela"></tbody>
+          </table>
+        </div>
+        <div class="paginacao">
+          <button type="button" id="pagina-anterior" class="secundario pequeno">‹ Anterior</button>
+          <span id="info-paginacao">—</span>
+          <button type="button" id="proxima-pagina" class="secundario pequeno">Próxima ›</button>
+        </div>
+        <div id="erro-listagem" class="erro" role="alert"></div>
+        <div id="sucesso-listagem" class="sucesso" role="status"></div>
       </div>
     </section>
   </main>
@@ -325,26 +379,33 @@
       $("sucesso-venda").textContent = "";
     });
 
-    $("formulario-carregar").addEventListener("submit", async (evento) => {
-      evento.preventDefault();
-      const id = $("id-carregar").value;
+    async function carregarVendaParaEdicao(id) {
       $("sucesso-venda").textContent = "";
       limparErrosVenda();
-      if (!/^\d+$/.test(id) || Number(id) < 1) {
-        $("erro-venda").textContent = "Informe o número da venda a editar.";
-        return;
-      }
       try {
         const { resposta, dados } = await chamarApi(`/api/web/records/${id}`);
         if (!resposta.ok) {
           $("erro-venda").textContent = dados.erro || "Não foi possível carregar a venda.";
-          return;
+          return false;
         }
         prepararEdicao(dados);
-        $("id-carregar").value = "";
+        return true;
       } catch (erro) {
         if (!(erro instanceof NaoAutenticado)) $("erro-venda").textContent = "Não foi possível conectar à API.";
+        return false;
       }
+    }
+
+    $("formulario-carregar").addEventListener("submit", async (evento) => {
+      evento.preventDefault();
+      const id = $("id-carregar").value;
+      if (!/^\d+$/.test(id) || Number(id) < 1) {
+        $("sucesso-venda").textContent = "";
+        limparErrosVenda();
+        $("erro-venda").textContent = "Informe o número da venda a editar.";
+        return;
+      }
+      if (await carregarVendaParaEdicao(id)) $("id-carregar").value = "";
     });
 
     $("formulario-venda").addEventListener("submit", async (evento) => {
@@ -377,11 +438,197 @@
           prepararNovaVenda();
           $("sucesso-venda").textContent = `Venda nº ${dados.id} cadastrada: ${resumo}.`;
         }
+        carregarListagem();
       } catch (erro) {
         if (!(erro instanceof NaoAutenticado)) $("erro-venda").textContent = "Não foi possível conectar à API.";
       } finally {
         botao.disabled = false;
       }
+    });
+
+    // --- Listagem, ordenação e exclusão (#3) ---------------------------------------------------------
+
+    const listagem = { pagina: 1, totalPaginas: 1, ordenar: "data_venda", direcao: "desc" };
+    const selecionadas = new Set();
+    const ROTULOS_DIRECAO = { asc: "ascending", desc: "descending" };
+
+    function formatarData(iso) {
+      const [ano, mes, dia] = iso.split("-");
+      return `${dia}/${mes}/${ano}`;
+    }
+
+    function celula(texto, classe) {
+      const td = document.createElement("td");
+      td.textContent = texto;
+      if (classe) td.className = classe;
+      return td;
+    }
+
+    function atualizarCabecalhos() {
+      for (const th of document.querySelectorAll("#tabela-vendas th[data-coluna]")) {
+        const ativa = th.dataset.coluna === listagem.ordenar;
+        if (ativa) th.setAttribute("aria-sort", ROTULOS_DIRECAO[listagem.direcao]);
+        else th.removeAttribute("aria-sort");
+        th.querySelector(".seta").textContent = ativa ? (listagem.direcao === "asc" ? "▲" : "▼") : "";
+      }
+    }
+
+    function atualizarSelecao() {
+      const caixas = [...document.querySelectorAll("#corpo-tabela input[type=checkbox]")];
+      for (const caixa of caixas) caixa.closest("tr").classList.toggle("selecionada", caixa.checked);
+      const marcadas = caixas.filter((caixa) => caixa.checked).length;
+      $("selecionar-todas").checked = caixas.length > 0 && marcadas === caixas.length;
+      $("selecionar-todas").indeterminate = marcadas > 0 && marcadas < caixas.length;
+      const botao = $("excluir-selecionadas");
+      botao.disabled = selecionadas.size === 0;
+      botao.textContent = selecionadas.size ? `Excluir selecionadas (${selecionadas.size})` : "Excluir selecionadas";
+    }
+
+    function desenharTabela(vendas) {
+      const corpo = $("corpo-tabela");
+      corpo.replaceChildren();
+      if (!vendas.length) {
+        const linha = document.createElement("tr");
+        const vazio = celula("Nenhuma venda cadastrada.", "vazio");
+        vazio.colSpan = 8;
+        linha.append(vazio);
+        corpo.append(linha);
+        return;
+      }
+      for (const venda of vendas) {
+        const linha = document.createElement("tr");
+        const caixa = document.createElement("input");
+        caixa.type = "checkbox";
+        caixa.checked = selecionadas.has(venda.id);
+        caixa.setAttribute("aria-label", `Selecionar venda nº ${venda.id}`);
+        caixa.addEventListener("change", () => {
+          if (caixa.checked) selecionadas.add(venda.id);
+          else selecionadas.delete(venda.id);
+          atualizarSelecao();
+        });
+        const tdCaixa = celula("", "selecao");
+        tdCaixa.append(caixa);
+
+        const editar = document.createElement("button");
+        editar.type = "button";
+        editar.className = "secundario pequeno";
+        editar.textContent = "Editar";
+        editar.addEventListener("click", async () => {
+          if (await carregarVendaParaEdicao(venda.id)) $("cartao-venda").scrollIntoView({ behavior: "smooth" });
+        });
+        const tdAcoes = celula("");
+        tdAcoes.append(editar);
+
+        linha.append(
+          tdCaixa,
+          celula(venda.id, "numero"),
+          celula(formatarData(venda.data_venda)),
+          celula(venda.produto_nome),
+          celula(venda.categoria),
+          celula(venda.quantidade, "numero"),
+          celula(moeda.format(venda.valor_total), "numero"),
+          tdAcoes,
+        );
+        corpo.append(linha);
+      }
+    }
+
+    async function carregarListagem() {
+      $("erro-listagem").textContent = "";
+      const parametros = new URLSearchParams({
+        pagina: listagem.pagina,
+        ordenar: listagem.ordenar,
+        direcao: listagem.direcao,
+      });
+      try {
+        const { resposta, dados } = await chamarApi(`/api/web/records?${parametros}`);
+        if (!resposta.ok) {
+          $("erro-listagem").textContent = dados.erro || "Não foi possível carregar as vendas.";
+          return;
+        }
+        listagem.totalPaginas = dados.total_paginas;
+        if (listagem.pagina > dados.total_paginas) {
+          // A página ficou vazia (ex.: depois de excluir os últimos itens): volta para a última existente.
+          listagem.pagina = dados.total_paginas;
+          return carregarListagem();
+        }
+        desenharTabela(dados.vendas);
+        atualizarCabecalhos();
+        atualizarSelecao();
+        $("info-paginacao").textContent =
+          `Página ${dados.pagina} de ${dados.total_paginas} · ${dados.total} ${dados.total === 1 ? "venda" : "vendas"}`;
+        $("pagina-anterior").disabled = dados.pagina <= 1;
+        $("proxima-pagina").disabled = dados.pagina >= dados.total_paginas;
+      } catch (erro) {
+        if (!(erro instanceof NaoAutenticado)) $("erro-listagem").textContent = "Não foi possível conectar à API.";
+      }
+    }
+
+    for (const th of document.querySelectorAll("#tabela-vendas th[data-coluna]")) {
+      th.querySelector("button").addEventListener("click", () => {
+        const coluna = th.dataset.coluna;
+        if (listagem.ordenar === coluna) listagem.direcao = listagem.direcao === "asc" ? "desc" : "asc";
+        else {
+          listagem.ordenar = coluna;
+          listagem.direcao = coluna === "produto_nome" || coluna === "categoria" ? "asc" : "desc";
+        }
+        listagem.pagina = 1;
+        carregarListagem();
+      });
+    }
+
+    $("selecionar-todas").addEventListener("change", (evento) => {
+      const marcar = evento.target.checked;
+      for (const caixa of document.querySelectorAll("#corpo-tabela input[type=checkbox]")) {
+        caixa.checked = marcar;
+        caixa.dispatchEvent(new Event("change"));
+      }
+    });
+
+    $("pagina-anterior").addEventListener("click", () => {
+      if (listagem.pagina > 1) {
+        listagem.pagina -= 1;
+        carregarListagem();
+      }
+    });
+
+    $("proxima-pagina").addEventListener("click", () => {
+      if (listagem.pagina < listagem.totalPaginas) {
+        listagem.pagina += 1;
+        carregarListagem();
+      }
+    });
+
+    $("excluir-selecionadas").addEventListener("click", async () => {
+      const ids = [...selecionadas].sort((a, b) => a - b);
+      if (!ids.length) return;
+      const descricao = ids.length === 1 ? `a venda nº ${ids[0]}` : `${ids.length} vendas (nº ${ids.join(", ")})`;
+      if (!confirm(`Excluir ${descricao}? Esta ação não pode ser desfeita.`)) return;
+
+      $("erro-listagem").textContent = "";
+      $("sucesso-listagem").textContent = "";
+      const botao = $("excluir-selecionadas");
+      botao.disabled = true;
+      const excluidas = [];
+      const falhas = [];
+      try {
+        for (const id of ids) {
+          const { resposta, dados } = await chamarApi(`/api/web/records/${id}`, { method: "DELETE" });
+          // 404: outra sessão já excluiu; para quem está na tela, o resultado é o mesmo.
+          if (resposta.ok || resposta.status === 404) excluidas.push(id);
+          else falhas.push(`nº ${id}: ${dados.erro || "erro"}`);
+        }
+      } catch (erro) {
+        if (erro instanceof NaoAutenticado) return;
+        falhas.push("não foi possível conectar à API");
+      }
+      for (const id of excluidas) selecionadas.delete(id);
+      if (excluidas.includes(idEmEdicao)) prepararNovaVenda();
+      if (excluidas.length)
+        $("sucesso-listagem").textContent =
+          excluidas.length === 1 ? `Venda nº ${excluidas[0]} excluída.` : `${excluidas.length} vendas excluídas.`;
+      if (falhas.length) $("erro-listagem").textContent = `Não foi possível excluir: ${falhas.join("; ")}.`;
+      await carregarListagem();
     });
 
     function mostrarLogin() {
@@ -403,6 +650,10 @@
       prepararNovaVenda();
       $("sucesso-venda").textContent = "";
       carregarProdutos();
+      selecionadas.clear();
+      listagem.pagina = 1;
+      $("sucesso-listagem").textContent = "";
+      carregarListagem();
     }
 
     async function restaurarSessao() {
