@@ -140,6 +140,47 @@ curl -i -X PUT http://localhost:8080/api/web/records/1 -H "Authorization: Bearer
 
 Cada operação registra uma linha na camada `api` e outra na camada `db`, com `client: "web"` e o mesmo `request_id`. Os valores de `operation` são `listar_produtos`, `consultar_venda`, `criar_venda` e `editar_venda`. Venda inexistente e produto inexistente geram `WARN` com `status: "error"` nas duas camadas. Dados ou id inválidos são recusados antes de chegar ao banco, então geram `WARN` só na camada `api`. Falhas no banco geram `ERROR`.
 
+## #3 — Listagem paginada, ordenação e exclusão na Web
+
+### Usar pela Web
+
+1. Faça login em <http://localhost:8080>. O cartão **Vendas cadastradas** carrega as vendas do banco assim que a página abre.
+2. **Colunas:** Nº, Data, Produto, Categoria, Qtd. e Valor total, com **5 vendas por página**. Use **‹ Anterior** e **Próxima ›** para navegar; o rodapé mostra a página atual, o total de páginas e o total de vendas.
+3. **Ordenar:** clique no título de uma coluna. Um clique ordena por ela; outro inverte a direção (▲ crescente, ▼ decrescente). A ordem inicial é por data, da mais recente para a mais antiga.
+4. **Selecionar e excluir:** marque as caixas das vendas (ou a caixa do cabeçalho, para todas as da página) e clique em **Excluir selecionadas (N)**. Depois da confirmação, as vendas são excluídas do banco e a tabela é recarregada. Se a página ficar vazia, a tabela volta para a última página existente.
+5. **Editar:** o botão **Editar** de cada linha carrega a venda no formulário da #2. Ao salvar ou cadastrar uma venda, a tabela é atualizada.
+
+### Endpoints desta issue
+
+Ambos exigem `Authorization: Bearer <token>`. Sem token ou com token inválido, respondem `401`.
+
+| Método | Rota | Resposta |
+|---|---|---|
+| GET | `/api/web/records` | `200 {"vendas", "pagina", "itens_por_pagina", "total", "total_paginas", "ordenar", "direcao"}`; `400` parâmetros inválidos |
+| DELETE | `/api/web/records/{id}` | `200 {"id", "mensagem"}`; `400` id inválido (mesma regra da #2); `404` se a venda não existir |
+
+Parâmetros da listagem, na query string (todos opcionais):
+
+| Parâmetro | Valores | Padrão |
+|---|---|---|
+| `pagina` | inteiro de 1 a 100000 | `1` |
+| `ordenar` | `id`, `data_venda`, `produto_nome`, `categoria`, `quantidade`, `valor_total` | `data_venda` |
+| `direcao` | `asc` ou `desc` | `desc` |
+
+Cada página tem 5 vendas, no mesmo formato devolvido pela #2. Em caso de empate na coluna escolhida, o `id` desempata, para que nenhuma venda se repita ou suma entre as páginas. Uma página depois da última volta com `vendas: []` e o `total_paginas` atual. A coluna de ordenação vem de uma lista fixa no `db.py`, então o texto enviado pelo usuário nunca entra no SQL.
+
+Pelo terminal (com o `TOKEN` obtido como na #2):
+
+```bash
+curl -s "http://localhost:8080/api/web/records?pagina=2&ordenar=valor_total&direcao=asc" \
+  -H "Authorization: Bearer $TOKEN"
+curl -i -X DELETE http://localhost:8080/api/web/records/1 -H "Authorization: Bearer $TOKEN"
+```
+
+### Logs
+
+A listagem (leitura) e a exclusão registram uma linha na camada `api` e outra na camada `db`, com `client: "web"` e o mesmo `request_id`. Os valores de `operation` são `listar_vendas` e `excluir_venda`. Excluir uma venda inexistente gera `WARN` com `status: "error"` nas duas camadas. Parâmetros inválidos na listagem são recusados antes de chegar ao banco, então geram `WARN` só na camada `api`. Falhas no banco geram `ERROR`.
+
 ## Logs
 
 Cada evento é uma linha JSON no stdout, com `timestamp`, `level`, `layer` (`api`/`db`), `client` (`web`/`cli`), `operation`, `status`, `request_id` e `message`. API e banco compartilham o mesmo `request_id` dentro de uma requisição (também devolvido no header `X-Request-ID`). A inicialização do banco usa `client: "sistema"` e `request_id: "inicializacao"`. Erros não previstos na API viram `500 {"erro": "Erro interno"}` com log `ERROR`.
