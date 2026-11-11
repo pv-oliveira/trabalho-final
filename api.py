@@ -29,6 +29,10 @@ FORMATO_ID = re.compile(r"[0-9]+")  # só dígitos ASCII (\d aceitaria "１")
 # Fuso usado para saber qual é a data de "hoje" (data da venda não pode ser futura).
 FUSO_HORARIO_PADRAO = "America/Fortaleza"
 
+# Listagem da Web: 5 vendas por página, ordenadas por data (mais recentes primeiro) por padrão.
+ITENS_POR_PAGINA = 5
+PAGINA_MAXIMA = 100_000
+
 # Hash usado quando o usuário não existe, para o login levar o mesmo tempo nos dois casos
 # e não revelar quais usuários estão cadastrados.
 HASH_FICTICIO = generate_password_hash("senha-ficticia")
@@ -320,6 +324,61 @@ def web_editar_venda(id_venda):
         return resposta_venda_nao_encontrada("editar_venda", id_venda)
     registrar_log("INFO", "web", "editar_venda", "success", f"Venda {id_venda} atualizada")
     return jsonify(venda_para_json(linha)), 200
+
+
+@app.get("/api/web/records")
+@exigir_autenticacao_web("listar_vendas")
+def web_listar_vendas():
+    pagina = request.args.get("pagina", "1")
+    ordenar = request.args.get("ordenar", "data_venda")
+    direcao = request.args.get("direcao", "desc")
+
+    erros = {}
+    if not FORMATO_ID.fullmatch(pagina) or not 1 <= int(pagina) <= PAGINA_MAXIMA:
+        erros["pagina"] = f"A página deve ser um número inteiro entre 1 e {PAGINA_MAXIMA}."
+    if ordenar not in db.COLUNAS_ORDENACAO_WEB:
+        erros["ordenar"] = f"Ordene por: {', '.join(db.COLUNAS_ORDENACAO_WEB)}."
+    if direcao not in ("asc", "desc"):
+        erros["direcao"] = "A direção deve ser asc ou desc."
+    if erros:
+        registrar_log("WARN", "web", "listar_vendas", "error", f"Parâmetros inválidos: {', '.join(sorted(erros))}")
+        return jsonify(erro="Parâmetros inválidos.", campos=erros), 400
+
+    pagina = int(pagina)
+    try:
+        linhas, total = db.listar_vendas_web(pagina, ITENS_POR_PAGINA, ordenar, direcao, g.request_id)
+    except psycopg.Error:
+        return resposta_falha_no_banco("listar_vendas")
+    total_paginas = max(1, -(-total // ITENS_POR_PAGINA))
+    registrar_log("INFO", "web", "listar_vendas", "success", f"Página {pagina} de {total_paginas} listada")
+    return (
+        jsonify(
+            vendas=[venda_para_json(linha) for linha in linhas],
+            pagina=pagina,
+            itens_por_pagina=ITENS_POR_PAGINA,
+            total=total,
+            total_paginas=total_paginas,
+            ordenar=ordenar,
+            direcao=direcao,
+        ),
+        200,
+    )
+
+
+@app.delete("/api/web/records/<id_venda>")
+@exigir_autenticacao_web("excluir_venda")
+def web_excluir_venda(id_venda):
+    id_venda, erro = ler_id_venda(id_venda, "excluir_venda")
+    if erro:
+        return erro
+    try:
+        excluida = db.excluir_venda_web(id_venda, g.request_id)
+    except psycopg.Error:
+        return resposta_falha_no_banco("excluir_venda")
+    if not excluida:
+        return resposta_venda_nao_encontrada("excluir_venda", id_venda)
+    registrar_log("INFO", "web", "excluir_venda", "success", f"Venda {id_venda} excluída")
+    return jsonify(id=id_venda, mensagem="Venda excluída."), 200
 
 
 def inicializar():

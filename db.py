@@ -6,6 +6,7 @@ import sys
 from datetime import datetime, timezone
 
 import psycopg
+from psycopg import sql
 from psycopg.rows import dict_row
 
 
@@ -215,3 +216,59 @@ def editar_venda_web(id_venda, venda, request_id):
     else:
         registrar_log("INFO", "web", "editar_venda", "success", request_id, f"Venda {id_venda} atualizada")
     return linha
+
+
+# Colunas pelas quais a listagem da Web pode ser ordenada (nome do parâmetro -> coluna SQL).
+# A API só aceita essas chaves, então nenhum texto do usuário entra na consulta.
+COLUNAS_ORDENACAO_WEB = {
+    "id": "venda.id",
+    "data_venda": "venda.data_venda",
+    "produto_nome": "produto.nome",
+    "categoria": "produto.categoria",
+    "quantidade": "venda.quantidade",
+    "valor_total": "venda.valor_total",
+}
+
+
+def listar_vendas_web(pagina, itens_por_pagina, ordenar, direcao, request_id):
+    """Retorna (vendas da página, total de vendas) para a tabela da Web.
+
+    `ordenar` deve ser uma chave de COLUNAS_ORDENACAO_WEB e `direcao`, "asc" ou "desc".
+    O id desempata a ordenação, para a paginação ser estável.
+    """
+    sentido = sql.SQL("DESC" if direcao == "desc" else "ASC")
+    consulta = sql.SQL(
+        """
+        SELECT venda.id, venda.produto_id, produto.nome AS produto_nome, produto.categoria,
+               venda.quantidade, venda.valor_unitario, venda.valor_total, venda.data_venda
+        FROM venda JOIN produto ON produto.id = venda.produto_id
+        ORDER BY {coluna} {sentido}, venda.id {sentido}
+        LIMIT %s OFFSET %s
+        """
+    ).format(coluna=sql.SQL(COLUNAS_ORDENACAO_WEB[ordenar]), sentido=sentido)
+    try:
+        with obter_conexao() as conexao:
+            total = conexao.execute("SELECT COUNT(*) AS total FROM venda").fetchone()["total"]
+            linhas = conexao.execute(consulta, (itens_por_pagina, (pagina - 1) * itens_por_pagina)).fetchall()
+    except psycopg.Error:
+        registrar_log("ERROR", "web", "listar_vendas", "error", request_id, "Falha ao listar vendas")
+        raise
+    registrar_log(
+        "INFO", "web", "listar_vendas", "success", request_id, f"Página {pagina}: {len(linhas)} de {total} vendas"
+    )
+    return linhas, total
+
+
+def excluir_venda_web(id_venda, request_id):
+    """Exclui a venda. Retorna True se ela existia e foi excluída, False se não existia."""
+    try:
+        with obter_conexao() as conexao:
+            excluida = conexao.execute("DELETE FROM venda WHERE id = %s RETURNING id", (id_venda,)).fetchone()
+    except psycopg.Error:
+        registrar_log("ERROR", "web", "excluir_venda", "error", request_id, "Falha ao excluir venda")
+        raise
+    if excluida is None:
+        registrar_log("WARN", "web", "excluir_venda", "error", request_id, f"Venda {id_venda} não encontrada")
+        return False
+    registrar_log("INFO", "web", "excluir_venda", "success", request_id, f"Venda {id_venda} excluída")
+    return True
