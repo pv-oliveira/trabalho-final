@@ -190,7 +190,8 @@ A listagem (leitura) e a exclusão registram uma linha na camada `api` e outra n
 2. Preencha um ou mais filtros e clique em **Buscar**. A consulta é feita em segundo plano (`fetch`), sem recarregar a página, e a tabela passa a mostrar só as vendas encontradas. Abaixo dos botões aparece um resumo dos filtros aplicados, e o rodapé mostra quantas vendas foram encontradas.
 3. Paginação, ordenação pelas colunas, edição e exclusão continuam funcionando sobre o resultado da busca. Os filtros aplicados só mudam ao clicar em **Buscar** de novo: editar os campos sem buscar não altera a tabela.
 4. **Limpar filtros** apaga os campos e volta à listagem completa da #3, na primeira página.
-5. Se a data final for anterior à inicial, a página mostra o erro no campo e não faz a consulta. Se a API recusar algum filtro, a mensagem dela aparece abaixo da tabela, e a tabela continua com o último resultado válido.
+5. Se a data final for anterior à inicial, a página mostra o erro no campo e não faz a consulta. Se a API recusar algum filtro, a mensagem dela aparece abaixo da tabela, a tabela continua com o último resultado válido e o formulário volta a mostrar os filtros que continuam aplicados.
+6. Durante a exclusão de vendas selecionadas, **Buscar**, **Limpar filtros**, a paginação e a ordenação ficam desabilitadas até a exclusão terminar.
 
 ### Filtros disponíveis
 
@@ -199,7 +200,7 @@ Os filtros são combinados com **E** (a venda precisa atender a todos os informa
 | Parâmetro | No formulário | Regra |
 |---|---|---|
 | `produto_id` | Produto | Número de um produto do catálogo (inteiro positivo). Um número válido sem produto cadastrado devolve zero vendas |
-| `categoria` | Categoria | `Alimentos`, `Bebidas`, `Higiene` ou `Limpeza` (exatamente assim, com a inicial maiúscula) |
+| `categoria` | Categoria | Nome exato de uma categoria do catálogo (hoje `Alimentos`, `Bebidas`, `Higiene` ou `Limpeza`, com a inicial maiúscula). A lista da tela vem do banco; uma categoria sem produtos devolve zero vendas, como o `produto_id` sem produto |
 | `data_inicio` | Data inicial | `AAAA-MM-DD`. Vendas a partir dessa data, inclusive |
 | `data_fim` | Data final | `AAAA-MM-DD`. Vendas até essa data, inclusive. Não pode ser anterior a `data_inicio` |
 
@@ -219,7 +220,7 @@ A resposta tem o mesmo formato da listagem da #3, mais `filtros`, com os filtros
 {"erro": "Parâmetros inválidos.", "campos": {"data_fim": "A data final não pode ser anterior à data inicial."}}
 ```
 
-A consulta SQL é própria da busca Web (`buscar_vendas_web` no `db.py`). As condições do `WHERE` vêm de uma lista fixa e só entram as dos filtros informados. Os valores vão como parâmetros, então o texto enviado pelo usuário nunca entra no SQL. A contagem e a página são lidas na mesma transação, como na listagem.
+A consulta SQL é própria da busca Web (`buscar_vendas_web` no `db.py`). As condições do `WHERE` vêm de uma lista fixa (`CONDICOES_BUSCA_WEB`) e só entram as dos filtros informados. A listagem completa da #3 (`listar_vendas_web`) usa a mesma consulta sem filtros, então as duas não divergem. Os valores vão como parâmetros, então o texto enviado pelo usuário nunca entra no SQL. A contagem e a página são lidas na mesma transação, como na listagem.
 
 ### Exemplos de uso
 

@@ -417,12 +417,14 @@ def ler_filtros_busca(erros):
         else:
             filtros["produto_id"] = numero
 
+    # A categoria não é conferida com uma lista: a inexistente só não encontra vendas, como o
+    # produto_id sem produto. O banco é a fonte das categorias, a mesma do select da Web.
     categoria = request.args.get("categoria", "")
     if categoria:
-        if categoria in db.CATEGORIAS:
-            filtros["categoria"] = categoria
+        if "\x00" in categoria:  # o PostgreSQL recusa NUL em TEXT, o que viraria 500
+            erros["categoria"] = "Categoria inválida."
         else:
-            erros["categoria"] = f"A categoria deve ser: {', '.join(db.CATEGORIAS)}."
+            filtros["categoria"] = categoria
 
     for campo, nome in (("data_inicio", "inicial"), ("data_fim", "final")):
         texto = request.args.get(campo, "")
@@ -437,6 +439,15 @@ def ler_filtros_busca(erros):
         erros["data_fim"] = "A data final não pode ser anterior à data inicial."
 
     return filtros
+
+
+def filtros_para_json(filtros):
+    """Todos os filtros da busca, com `null` nos ausentes e as datas em AAAA-MM-DD."""
+    return {
+        campo: valor.isoformat() if isinstance(valor, date) else valor
+        for campo in db.CAMPOS_BUSCA_WEB
+        for valor in [filtros.get(campo)]
+    }
 
 
 @app.get("/api/web/records/search")
@@ -460,12 +471,7 @@ def web_buscar_vendas():
         f"Busca ({', '.join(sorted(filtros)) or 'sem filtros'}): {total} vendas, página {pagina} de {total_de_paginas(total)}",
     )
     corpo = corpo_da_pagina(linhas, total, pagina, ordenar, direcao)
-    corpo["filtros"] = {
-        "produto_id": filtros.get("produto_id"),
-        "categoria": filtros.get("categoria"),
-        "data_inicio": filtros["data_inicio"].isoformat() if "data_inicio" in filtros else None,
-        "data_fim": filtros["data_fim"].isoformat() if "data_fim" in filtros else None,
-    }
+    corpo["filtros"] = filtros_para_json(filtros)
     return jsonify(corpo), 200
 
 

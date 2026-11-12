@@ -231,9 +231,17 @@ def test_produto_com_zeros_a_esquerda(cliente_http, cabecalho, vendas):
 
 
 def test_texto_do_filtro_nao_entra_no_sql(cliente_http, cabecalho, vendas):
-    resposta = _buscar(cliente_http, cabecalho, "categoria=Bebidas' OR '1'='1")
-    assert resposta.status_code == 400
+    resposta = _buscar(cliente_http, cabecalho, "categoria=Bebidas'%20OR%20'1'='1")
+    assert resposta.status_code == 200 and resposta.get_json()["total"] == 0
     assert _buscar(cliente_http, cabecalho).get_json()["total"] == 10
+
+
+@pytest.mark.parametrize("categoria", ["bebidas", "Eletrônicos", "Outra"])
+def test_categoria_fora_do_catalogo_nao_encontra_vendas(cliente_http, cabecalho, vendas, categoria):
+    resposta = _buscar(cliente_http, cabecalho, f"categoria={categoria}")
+    assert resposta.status_code == 200
+    corpo = resposta.get_json()
+    assert corpo["total"] == 0 and corpo["vendas"] == [] and corpo["filtros"]["categoria"] == categoria
 
 
 # --- validação ------------------------------------------------------------------------------------
@@ -249,8 +257,7 @@ def test_texto_do_filtro_nao_entra_no_sql(cliente_http, cabecalho, vendas):
         ("produto_id=%EF%BC%91", {"produto_id"}),  # "１" (dígito de largura total)
         (f"produto_id={api.ID_MAXIMO + 1}", {"produto_id"}),
         ("produto_id=" + "9" * 5000, {"produto_id"}),
-        ("categoria=bebidas", {"categoria"}),
-        ("categoria=Eletrônicos", {"categoria"}),
+        ("categoria=Bebidas%00", {"categoria"}),
         ("data_inicio=2026-13-01", {"data_inicio"}),
         ("data_inicio=01/10/2026", {"data_inicio"}),
         ("data_fim=2026-02-30", {"data_fim"}),
@@ -259,7 +266,7 @@ def test_texto_do_filtro_nao_entra_no_sql(cliente_http, cabecalho, vendas):
         ("pagina=0", {"pagina"}),
         ("ordenar=senha_hash", {"ordenar"}),
         ("direcao=cima", {"direcao"}),
-        ("produto_id=x&categoria=y&data_inicio=z&pagina=0", {"produto_id", "categoria", "data_inicio", "pagina"}),
+        ("produto_id=x&categoria=%00&data_inicio=z&pagina=0", {"produto_id", "categoria", "data_inicio", "pagina"}),
     ],
 )
 def test_parametros_invalidos_retornam_400_sem_consultar_o_banco(
@@ -280,9 +287,9 @@ def test_periodo_invertido_explica_o_erro(cliente_http, cabecalho):
     assert corpo["campos"] == {"data_fim": "A data final não pode ser anterior à data inicial."}
 
 
-def test_categoria_invalida_lista_as_aceitas(cliente_http, cabecalho):
-    corpo = _buscar(cliente_http, cabecalho, "categoria=Outra").get_json()
-    assert corpo["campos"]["categoria"] == "A categoria deve ser: Alimentos, Bebidas, Higiene, Limpeza."
+def test_categoria_com_nul_e_recusada(cliente_http, cabecalho):
+    corpo = _buscar(cliente_http, cabecalho, "categoria=Bebidas%00").get_json()
+    assert corpo["campos"] == {"categoria": "Categoria inválida."}
 
 
 # --- logs -----------------------------------------------------------------------------------------
@@ -317,8 +324,8 @@ def test_busca_erro_no_banco(cliente_http, cabecalho, monkeypatch, capsys):
 # --- camada de banco ------------------------------------------------------------------------------
 
 
-def test_db_categorias_do_catalogo():
-    assert db.CATEGORIAS == ("Alimentos", "Bebidas", "Higiene", "Limpeza")
+def test_db_campos_busca_web():
+    assert db.CAMPOS_BUSCA_WEB == ("produto_id", "categoria", "data_inicio", "data_fim")
 
 
 def test_db_buscar_vendas_web_combina_filtros(vendas, capsys):
