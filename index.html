@@ -321,21 +321,31 @@
         const { resposta, dados } = await chamarApi("/api/web/produtos");
         if (!resposta.ok) throw new Error();
         produtos = dados.produtos;
-        select.replaceChildren(new Option("Selecione o produto", ""));
-        const grupos = {};
-        for (const produto of produtos) {
-          if (!grupos[produto.categoria]) {
-            grupos[produto.categoria] = document.createElement("optgroup");
-            grupos[produto.categoria].label = produto.categoria;
-            select.append(grupos[produto.categoria]);
-          }
-          grupos[produto.categoria].append(new Option(`${produto.nome} — ${moeda.format(produto.preco)}`, produto.id));
-        }
+        agruparProdutos(select, "Selecione o produto", (p) => `${p.nome} — ${moeda.format(p.preco)}`);
         preencherFiltrosDeProduto();
       } catch (erro) {
         if (erro instanceof NaoAutenticado) return;
-        select.replaceChildren(new Option("Não foi possível carregar os produtos", ""));
+        const aviso = "Não foi possível carregar os produtos";
+        select.replaceChildren(new Option(aviso, ""));
+        $("filtro-produto_id").replaceChildren(new Option(aviso, ""));
+        $("filtro-categoria").replaceChildren(new Option("Não foi possível carregar as categorias", ""));
       }
+    }
+
+    // Preenche `select` com os produtos agrupados por categoria e retorna as categorias em ordem.
+    // `rotulo` formata o texto de cada opção. Usado pelo formulário de venda e pelo filtro da busca.
+    function agruparProdutos(select, primeira, rotulo) {
+      select.replaceChildren(new Option(primeira, ""));
+      const grupos = {};
+      for (const produto of produtos) {
+        if (!grupos[produto.categoria]) {
+          grupos[produto.categoria] = document.createElement("optgroup");
+          grupos[produto.categoria].label = produto.categoria;
+          select.append(grupos[produto.categoria]);
+        }
+        grupos[produto.categoria].append(new Option(rotulo(produto), produto.id));
+      }
+      return Object.keys(grupos).sort();
     }
 
     function limparErrosVenda() {
@@ -537,6 +547,8 @@
       }
     }
 
+    // Atualiza a seleção e os controles que mudam a visão da tabela (busca, paginação, ordenação),
+    // que ficam desabilitados durante a exclusão para ela terminar sobre a mesma visão.
     function atualizarSelecao() {
       const caixas = [...document.querySelectorAll("#corpo-tabela input[type=checkbox]")];
       for (const caixa of caixas) {
@@ -550,6 +562,11 @@
       const botao = $("excluir-selecionadas");
       botao.disabled = excluindo || selecionadas.size === 0;
       botao.textContent = selecionadas.size ? `Excluir selecionadas (${selecionadas.size})` : "Excluir selecionadas";
+      $("buscar").disabled = excluindo;
+      $("limpar-filtros").disabled = excluindo;
+      $("pagina-anterior").disabled = excluindo || listagem.pagina <= 1;
+      $("proxima-pagina").disabled = excluindo || listagem.pagina >= listagem.totalPaginas;
+      for (const ordenar of document.querySelectorAll("#tabela-vendas th[data-coluna] button")) ordenar.disabled = excluindo;
     }
 
     function desenharTabela(vendas) {
@@ -621,6 +638,8 @@
           $("erro-listagem").textContent = dados.campos
             ? Object.values(dados.campos).join(" ")
             : dados.erro || "Não foi possível carregar as vendas.";
+          // A tabela continua com os filtros anteriores: o formulário volta a mostrá-los, junto do #filtros-ativos.
+          if (mudancas.filtros) preencherFormularioBusca(listagem.filtros);
           return;
         }
         if (dados.pagina > dados.total_paginas) {
@@ -640,8 +659,6 @@
         const contagem = `${dados.total} ${dados.total === 1 ? "venda" : "vendas"}${filtrada ? (dados.total === 1 ? " encontrada" : " encontradas") : ""}`;
         $("info-paginacao").textContent = `Página ${dados.pagina} de ${dados.total_paginas} · ${contagem}`;
         $("filtros-ativos").textContent = filtrada ? `Filtros aplicados: ${descreverFiltros(listagem.filtros)}.` : "";
-        $("pagina-anterior").disabled = dados.pagina <= 1;
-        $("proxima-pagina").disabled = dados.pagina >= dados.total_paginas;
       } catch (erro) {
         if (numero === ultimaRequisicaoListagem && !(erro instanceof NaoAutenticado))
           $("erro-listagem").textContent = "Não foi possível conectar à API.";
@@ -652,6 +669,7 @@
 
     for (const th of document.querySelectorAll("#tabela-vendas th[data-coluna]")) {
       th.querySelector("button").addEventListener("click", () => {
+        if (excluindo) return;
         const ordenar = th.dataset.coluna;
         let direcao;
         if (listagem.ordenar === ordenar) direcao = listagem.direcao === "asc" ? "desc" : "asc";
@@ -662,25 +680,21 @@
 
     // --- Busca avançada com filtros combináveis (#4) -------------------------------------------------
 
+    // Manter igual a CAMPOS_BUSCA_WEB de db.py.
     const CAMPOS_FILTRO = ["produto_id", "categoria", "data_inicio", "data_fim"];
+
+    function preencherFormularioBusca(filtros) {
+      for (const campo of CAMPOS_FILTRO) $(`filtro-${campo}`).value = filtros[campo] ?? "";
+    }
 
     function preencherFiltrosDeProduto() {
       const selectProduto = $("filtro-produto_id");
       const selectCategoria = $("filtro-categoria");
       const produtoEscolhido = selectProduto.value;
       const categoriaEscolhida = selectCategoria.value;
-      selectProduto.replaceChildren(new Option("Todos os produtos", ""));
+      const categorias = agruparProdutos(selectProduto, "Todos os produtos", (p) => p.nome);
       selectCategoria.replaceChildren(new Option("Todas as categorias", ""));
-      const grupos = {};
-      for (const produto of produtos) {
-        if (!grupos[produto.categoria]) {
-          grupos[produto.categoria] = document.createElement("optgroup");
-          grupos[produto.categoria].label = produto.categoria;
-          selectProduto.append(grupos[produto.categoria]);
-        }
-        grupos[produto.categoria].append(new Option(produto.nome, produto.id));
-      }
-      for (const categoria of Object.keys(grupos).sort()) selectCategoria.append(new Option(categoria, categoria));
+      for (const categoria of categorias) selectCategoria.append(new Option(categoria, categoria));
       selectProduto.value = produtoEscolhido;
       selectCategoria.value = categoriaEscolhida;
     }
@@ -733,6 +747,7 @@
 
     $("formulario-busca").addEventListener("submit", async (evento) => {
       evento.preventDefault();
+      if (excluindo) return;
       const filtros = lerFiltros();
       if (!filtros) return;
       $("sucesso-listagem").textContent = "";
@@ -740,6 +755,7 @@
     });
 
     $("limpar-filtros").addEventListener("click", () => {
+      if (excluindo) return;
       $("formulario-busca").reset();
       limparErrosBusca();
       $("sucesso-listagem").textContent = "";
@@ -755,11 +771,11 @@
     });
 
     $("pagina-anterior").addEventListener("click", () => {
-      if (listagem.pagina > 1) carregarListagem({ pagina: listagem.pagina - 1 });
+      if (!excluindo && listagem.pagina > 1) carregarListagem({ pagina: listagem.pagina - 1 });
     });
 
     $("proxima-pagina").addEventListener("click", () => {
-      if (listagem.pagina < listagem.totalPaginas) carregarListagem({ pagina: listagem.pagina + 1 });
+      if (!excluindo && listagem.pagina < listagem.totalPaginas) carregarListagem({ pagina: listagem.pagina + 1 });
     });
 
     async function excluirVenda(id) {

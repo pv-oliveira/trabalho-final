@@ -41,9 +41,6 @@ PRODUTOS_INICIAIS = [
     ("Papel higiênico 12 un", "Higiene", 19.90),
 ]
 
-# Categorias do catálogo, aceitas pelo filtro `categoria` da busca da Web.
-CATEGORIAS = tuple(sorted({categoria for _, categoria, _ in PRODUTOS_INICIAIS}))
-
 
 def obter_conexao():
     return psycopg.connect(os.environ["URL_BANCO"], row_factory=dict_row)
@@ -233,55 +230,25 @@ COLUNAS_ORDENACAO_WEB = {
 }
 
 
-def listar_vendas_web(pagina, itens_por_pagina, ordenar, direcao, request_id):
-    """Retorna (vendas da página, total de vendas) para a tabela da Web.
+# Filtros da busca avançada da Web (nome do parâmetro -> condição SQL), combinados com AND.
+# Os valores só entram como parâmetros, nunca no texto da consulta.
+CONDICOES_BUSCA_WEB = {
+    "produto_id": "venda.produto_id = %(produto_id)s",
+    "categoria": "produto.categoria = %(categoria)s",
+    "data_inicio": "venda.data_venda >= %(data_inicio)s",
+    "data_fim": "venda.data_venda <= %(data_fim)s",
+}
+CAMPOS_BUSCA_WEB = tuple(CONDICOES_BUSCA_WEB)
 
+
+def buscar_vendas_web(filtros, pagina, itens_por_pagina, ordenar, direcao, request_id, operacao="buscar_vendas"):
+    """Retorna (vendas da página, total de vendas encontradas) para a tabela da Web.
+
+    `filtros` pode ter as chaves de CONDICOES_BUSCA_WEB; os ausentes não restringem a busca.
     `ordenar` deve ser uma chave de COLUNAS_ORDENACAO_WEB e `direcao`, "asc" ou "desc".
-    O id desempata a ordenação, para a paginação ser estável.
+    O id desempata a ordenação, para a paginação ser estável. `operacao` vai para os logs.
     """
-    sentido = sql.SQL("DESC" if direcao == "desc" else "ASC")
-    consulta = sql.SQL(
-        """
-        SELECT venda.id, venda.produto_id, produto.nome AS produto_nome, produto.categoria,
-               venda.quantidade, venda.valor_unitario, venda.valor_total, venda.data_venda
-        FROM venda JOIN produto ON produto.id = venda.produto_id
-        ORDER BY {coluna} {sentido}, venda.id {sentido}
-        LIMIT %s OFFSET %s
-        """
-    ).format(coluna=sql.SQL(COLUNAS_ORDENACAO_WEB[ordenar]), sentido=sentido)
-    try:
-        with obter_conexao() as conexao:
-            # REPEATABLE READ: a contagem e a página veem o mesmo snapshot, então o total
-            # bate com as linhas devolvidas mesmo se outra sessão alterar vendas no meio.
-            conexao.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
-            total = conexao.execute("SELECT COUNT(*) AS total FROM venda").fetchone()["total"]
-            linhas = conexao.execute(consulta, (itens_por_pagina, (pagina - 1) * itens_por_pagina)).fetchall()
-    except psycopg.Error:
-        registrar_log("ERROR", "web", "listar_vendas", "error", request_id, "Falha ao listar vendas")
-        raise
-    registrar_log(
-        "INFO", "web", "listar_vendas", "success", request_id, f"Página {pagina}: {len(linhas)} de {total} vendas"
-    )
-    return linhas, total
-
-
-def buscar_vendas_web(filtros, pagina, itens_por_pagina, ordenar, direcao, request_id):
-    """Retorna (vendas da página, total de vendas encontradas) para a busca avançada da Web.
-
-    `filtros` pode ter `produto_id`, `categoria`, `data_inicio` e `data_fim`; os ausentes não
-    restringem a busca e os presentes são combinados com AND. O texto do usuário só entra como
-    parâmetro: as condições e a coluna de ordenação vêm de listas fixas deste módulo.
-    """
-    condicoes = [
-        sql.SQL(condicao)
-        for campo, condicao in (
-            ("produto_id", "venda.produto_id = %(produto_id)s"),
-            ("categoria", "produto.categoria = %(categoria)s"),
-            ("data_inicio", "venda.data_venda >= %(data_inicio)s"),
-            ("data_fim", "venda.data_venda <= %(data_fim)s"),
-        )
-        if campo in filtros
-    ]
+    condicoes = [sql.SQL(CONDICOES_BUSCA_WEB[campo]) for campo in CAMPOS_BUSCA_WEB if campo in filtros]
     onde = sql.SQL("WHERE ") + sql.SQL(" AND ").join(condicoes) if condicoes else sql.SQL("")
     sentido = sql.SQL("DESC" if direcao == "desc" else "ASC")
     contagem = sql.SQL(
@@ -300,22 +267,28 @@ def buscar_vendas_web(filtros, pagina, itens_por_pagina, ordenar, direcao, reque
     parametros = {**filtros, "limite": itens_por_pagina, "deslocamento": (pagina - 1) * itens_por_pagina}
     try:
         with obter_conexao() as conexao:
-            # Mesmo snapshot para a contagem e a página, como na listagem.
+            # REPEATABLE READ: a contagem e a página veem o mesmo snapshot, então o total
+            # bate com as linhas devolvidas mesmo se outra sessão alterar vendas no meio.
             conexao.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
             total = conexao.execute(contagem, filtros).fetchone()["total"]
             linhas = conexao.execute(consulta, parametros).fetchall()
     except psycopg.Error:
-        registrar_log("ERROR", "web", "buscar_vendas", "error", request_id, "Falha ao buscar vendas")
+        registrar_log("ERROR", "web", operacao, "error", request_id, "Falha ao consultar vendas")
         raise
     registrar_log(
         "INFO",
         "web",
-        "buscar_vendas",
+        operacao,
         "success",
         request_id,
-        f"Busca ({', '.join(sorted(filtros)) or 'sem filtros'}), página {pagina}: {len(linhas)} de {total} vendas",
+        f"Página {pagina}: {len(linhas)} de {total} vendas ({', '.join(sorted(filtros)) or 'sem filtros'})",
     )
     return linhas, total
+
+
+def listar_vendas_web(pagina, itens_por_pagina, ordenar, direcao, request_id):
+    """Retorna (vendas da página, total de vendas) para a listagem completa da Web."""
+    return buscar_vendas_web({}, pagina, itens_por_pagina, ordenar, direcao, request_id, operacao="listar_vendas")
 
 
 def excluir_venda_web(id_venda, request_id):
