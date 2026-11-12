@@ -142,6 +142,16 @@ def hoje():
     return datetime.now(fuso_horario()).date()
 
 
+def converter_data(texto):
+    """Converte `AAAA-MM-DD` em date. Retorna None se o formato ou a data forem inválidos."""
+    if not FORMATO_DATA.fullmatch(texto):
+        return None
+    try:
+        return date.fromisoformat(texto)
+    except ValueError:
+        return None
+
+
 def validar_venda(dados):
     """Valida os campos da venda. Retorna (venda, erros), com `erros` indexado pelo nome do campo."""
     erros = {}
@@ -189,12 +199,7 @@ def validar_venda(dados):
     if data_venda is None or data_venda == "":
         erros["data_venda"] = "Informe a data da venda."
     else:
-        data = None
-        if isinstance(data_venda, str) and FORMATO_DATA.fullmatch(data_venda):
-            try:
-                data = date.fromisoformat(data_venda)
-            except ValueError:
-                data = None
+        data = converter_data(data_venda) if isinstance(data_venda, str) else None
         if data is None:
             erros["data_venda"] = "Data inválida; use o formato AAAA-MM-DD."
         elif data > hoje():
@@ -326,27 +331,29 @@ def web_editar_venda(id_venda):
     return jsonify(venda_para_json(linha)), 200
 
 
-def ler_pagina(texto):
-    """Converte a página da query string. Retorna o número ou None se for inválido.
+def ler_inteiro_positivo(texto, maximo):
+    """Converte um inteiro da query string. Retorna o número ou None se não estiver entre 1 e `maximo`.
 
     Testa o tamanho antes de converter (como o ler_id_venda): o int() do Python recusa
     textos com mais de 4300 dígitos, o que viraria um 500 em vez de 400.
     """
     digitos = texto.lstrip("0") if FORMATO_ID.fullmatch(texto) else ""
-    if not digitos or len(digitos) > len(str(PAGINA_MAXIMA)):
+    if not digitos or len(digitos) > len(str(maximo)):
         return None
     valor = int(digitos)
-    return valor if valor <= PAGINA_MAXIMA else None
+    return valor if valor <= maximo else None
 
 
-@app.get("/api/web/records")
-@exigir_autenticacao_web("listar_vendas")
-def web_listar_vendas():
+def ler_pagina(texto):
+    """Converte a página da query string. Retorna o número ou None se for inválido."""
+    return ler_inteiro_positivo(texto, PAGINA_MAXIMA)
+
+
+def ler_paginacao(erros):
+    """Lê `pagina`, `ordenar` e `direcao` da query string, anotando os inválidos em `erros`."""
     pagina = request.args.get("pagina", "1")
     ordenar = request.args.get("ordenar", "data_venda")
     direcao = request.args.get("direcao", "desc")
-
-    erros = {}
     numero_pagina = ler_pagina(pagina)
     if numero_pagina is None:
         erros["pagina"] = f"A página deve ser um número inteiro entre 1 e {PAGINA_MAXIMA}."
@@ -354,29 +361,112 @@ def web_listar_vendas():
         erros["ordenar"] = f"Ordene por: {', '.join(db.COLUNAS_ORDENACAO_WEB)}."
     if direcao not in ("asc", "desc"):
         erros["direcao"] = "A direção deve ser asc ou desc."
-    if erros:
-        registrar_log("WARN", "web", "listar_vendas", "error", f"Parâmetros inválidos: {', '.join(sorted(erros))}")
-        return jsonify(erro="Parâmetros inválidos.", campos=erros), 400
+    return numero_pagina, ordenar, direcao
 
-    pagina = numero_pagina
+
+def resposta_parametros_invalidos(operacao, erros):
+    registrar_log("WARN", "web", operacao, "error", f"Parâmetros inválidos: {', '.join(sorted(erros))}")
+    return jsonify(erro="Parâmetros inválidos.", campos=erros), 400
+
+
+def total_de_paginas(total):
+    return max(1, -(-total // ITENS_POR_PAGINA))
+
+
+def corpo_da_pagina(linhas, total, pagina, ordenar, direcao):
+    """Campos comuns às respostas da listagem e da busca."""
+    return {
+        "vendas": [venda_para_json(linha) for linha in linhas],
+        "pagina": pagina,
+        "itens_por_pagina": ITENS_POR_PAGINA,
+        "total": total,
+        "total_paginas": total_de_paginas(total),
+        "ordenar": ordenar,
+        "direcao": direcao,
+    }
+
+
+@app.get("/api/web/records")
+@exigir_autenticacao_web("listar_vendas")
+def web_listar_vendas():
+    erros = {}
+    pagina, ordenar, direcao = ler_paginacao(erros)
+    if erros:
+        return resposta_parametros_invalidos("listar_vendas", erros)
+
     try:
         linhas, total = db.listar_vendas_web(pagina, ITENS_POR_PAGINA, ordenar, direcao, g.request_id)
     except psycopg.Error:
         return resposta_falha_no_banco("listar_vendas")
-    total_paginas = max(1, -(-total // ITENS_POR_PAGINA))
-    registrar_log("INFO", "web", "listar_vendas", "success", f"Página {pagina} de {total_paginas} listada")
-    return (
-        jsonify(
-            vendas=[venda_para_json(linha) for linha in linhas],
-            pagina=pagina,
-            itens_por_pagina=ITENS_POR_PAGINA,
-            total=total,
-            total_paginas=total_paginas,
-            ordenar=ordenar,
-            direcao=direcao,
-        ),
-        200,
+    registrar_log("INFO", "web", "listar_vendas", "success", f"Página {pagina} de {total_de_paginas(total)} listada")
+    return jsonify(corpo_da_pagina(linhas, total, pagina, ordenar, direcao)), 200
+
+
+def ler_filtros_busca(erros):
+    """Lê os filtros da busca avançada da query string, anotando os inválidos em `erros`.
+
+    Filtro ausente ou vazio não restringe a busca. Retorna só os filtros informados e válidos.
+    """
+    filtros = {}
+
+    produto_id = request.args.get("produto_id", "")
+    if produto_id:
+        numero = ler_inteiro_positivo(produto_id, ID_MAXIMO)
+        if numero is None:
+            erros["produto_id"] = "O produto deve ser o número de um produto do catálogo."
+        else:
+            filtros["produto_id"] = numero
+
+    categoria = request.args.get("categoria", "")
+    if categoria:
+        if categoria in db.CATEGORIAS:
+            filtros["categoria"] = categoria
+        else:
+            erros["categoria"] = f"A categoria deve ser: {', '.join(db.CATEGORIAS)}."
+
+    for campo, nome in (("data_inicio", "inicial"), ("data_fim", "final")):
+        texto = request.args.get(campo, "")
+        if texto:
+            data = converter_data(texto)
+            if data is None:
+                erros[campo] = f"Data {nome} inválida; use o formato AAAA-MM-DD."
+            else:
+                filtros[campo] = data
+
+    if "data_inicio" in filtros and "data_fim" in filtros and filtros["data_inicio"] > filtros["data_fim"]:
+        erros["data_fim"] = "A data final não pode ser anterior à data inicial."
+
+    return filtros
+
+
+@app.get("/api/web/records/search")
+@exigir_autenticacao_web("buscar_vendas")
+def web_buscar_vendas():
+    erros = {}
+    filtros = ler_filtros_busca(erros)
+    pagina, ordenar, direcao = ler_paginacao(erros)
+    if erros:
+        return resposta_parametros_invalidos("buscar_vendas", erros)
+
+    try:
+        linhas, total = db.buscar_vendas_web(filtros, pagina, ITENS_POR_PAGINA, ordenar, direcao, g.request_id)
+    except psycopg.Error:
+        return resposta_falha_no_banco("buscar_vendas")
+    registrar_log(
+        "INFO",
+        "web",
+        "buscar_vendas",
+        "success",
+        f"Busca ({', '.join(sorted(filtros)) or 'sem filtros'}): {total} vendas, página {pagina} de {total_de_paginas(total)}",
     )
+    corpo = corpo_da_pagina(linhas, total, pagina, ordenar, direcao)
+    corpo["filtros"] = {
+        "produto_id": filtros.get("produto_id"),
+        "categoria": filtros.get("categoria"),
+        "data_inicio": filtros["data_inicio"].isoformat() if "data_inicio" in filtros else None,
+        "data_fim": filtros["data_fim"].isoformat() if "data_fim" in filtros else None,
+    }
+    return jsonify(corpo), 200
 
 
 @app.delete("/api/web/records/<id_venda>")

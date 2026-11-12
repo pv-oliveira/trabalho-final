@@ -41,6 +41,9 @@ PRODUTOS_INICIAIS = [
     ("Papel higiênico 12 un", "Higiene", 19.90),
 ]
 
+# Categorias do catálogo, aceitas pelo filtro `categoria` da busca da Web.
+CATEGORIAS = tuple(sorted({categoria for _, categoria, _ in PRODUTOS_INICIAIS}))
+
 
 def obter_conexao():
     return psycopg.connect(os.environ["URL_BANCO"], row_factory=dict_row)
@@ -258,6 +261,59 @@ def listar_vendas_web(pagina, itens_por_pagina, ordenar, direcao, request_id):
         raise
     registrar_log(
         "INFO", "web", "listar_vendas", "success", request_id, f"Página {pagina}: {len(linhas)} de {total} vendas"
+    )
+    return linhas, total
+
+
+def buscar_vendas_web(filtros, pagina, itens_por_pagina, ordenar, direcao, request_id):
+    """Retorna (vendas da página, total de vendas encontradas) para a busca avançada da Web.
+
+    `filtros` pode ter `produto_id`, `categoria`, `data_inicio` e `data_fim`; os ausentes não
+    restringem a busca e os presentes são combinados com AND. O texto do usuário só entra como
+    parâmetro: as condições e a coluna de ordenação vêm de listas fixas deste módulo.
+    """
+    condicoes = [
+        sql.SQL(condicao)
+        for campo, condicao in (
+            ("produto_id", "venda.produto_id = %(produto_id)s"),
+            ("categoria", "produto.categoria = %(categoria)s"),
+            ("data_inicio", "venda.data_venda >= %(data_inicio)s"),
+            ("data_fim", "venda.data_venda <= %(data_fim)s"),
+        )
+        if campo in filtros
+    ]
+    onde = sql.SQL("WHERE ") + sql.SQL(" AND ").join(condicoes) if condicoes else sql.SQL("")
+    sentido = sql.SQL("DESC" if direcao == "desc" else "ASC")
+    contagem = sql.SQL(
+        "SELECT COUNT(*) AS total FROM venda JOIN produto ON produto.id = venda.produto_id {onde}"
+    ).format(onde=onde)
+    consulta = sql.SQL(
+        """
+        SELECT venda.id, venda.produto_id, produto.nome AS produto_nome, produto.categoria,
+               venda.quantidade, venda.valor_unitario, venda.valor_total, venda.data_venda
+        FROM venda JOIN produto ON produto.id = venda.produto_id
+        {onde}
+        ORDER BY {coluna} {sentido}, venda.id {sentido}
+        LIMIT %(limite)s OFFSET %(deslocamento)s
+        """
+    ).format(onde=onde, coluna=sql.SQL(COLUNAS_ORDENACAO_WEB[ordenar]), sentido=sentido)
+    parametros = {**filtros, "limite": itens_por_pagina, "deslocamento": (pagina - 1) * itens_por_pagina}
+    try:
+        with obter_conexao() as conexao:
+            # Mesmo snapshot para a contagem e a página, como na listagem.
+            conexao.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+            total = conexao.execute(contagem, filtros).fetchone()["total"]
+            linhas = conexao.execute(consulta, parametros).fetchall()
+    except psycopg.Error:
+        registrar_log("ERROR", "web", "buscar_vendas", "error", request_id, "Falha ao buscar vendas")
+        raise
+    registrar_log(
+        "INFO",
+        "web",
+        "buscar_vendas",
+        "success",
+        request_id,
+        f"Busca ({', '.join(sorted(filtros)) or 'sem filtros'}), página {pagina}: {len(linhas)} de {total} vendas",
     )
     return linhas, total
 

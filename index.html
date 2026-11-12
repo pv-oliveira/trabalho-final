@@ -108,6 +108,12 @@
     button:disabled { opacity: 0.5; cursor: not-allowed; }
     .paginacao { display: flex; gap: 0.75rem; align-items: center; justify-content: flex-end; margin-top: 1rem; }
     .paginacao span { color: var(--suave); font-size: 0.9rem; }
+    #formulario-busca { margin-top: 1rem; padding: 1rem; border: 1px solid var(--borda); border-radius: 6px; background: var(--fundo); }
+    #formulario-busca legend { font-weight: 600; padding: 0 0.25rem; }
+    #formulario-busca fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+    #formulario-busca label { margin-top: 0.5rem; }
+    #formulario-busca .acoes { margin-top: 0.75rem; }
+    .filtros-ativos { color: var(--suave); font-size: 0.85rem; }
   </style>
 </head>
 <body>
@@ -139,7 +145,7 @@
       <div class="cartao">
         <h2 style="margin-top:0">Página inicial</h2>
         <p>Bem-vindo(a), <strong id="nome-boas-vindas"></strong>.</p>
-        <p class="situacao">Busca, exportação e dashboard serão adicionados nas próximas issues.</p>
+        <p class="situacao">Exportação e dashboard serão adicionados nas próximas issues.</p>
       </div>
 
       <div class="cartao" id="cartao-venda">
@@ -193,6 +199,40 @@
           <h2>Vendas cadastradas</h2>
           <button type="button" id="excluir-selecionadas" class="perigo" disabled>Excluir selecionadas</button>
         </div>
+        <form id="formulario-busca" novalidate>
+          <fieldset>
+            <legend>Busca avançada</legend>
+            <div class="grade-campos">
+              <div>
+                <label for="filtro-produto_id">Produto</label>
+                <select id="filtro-produto_id">
+                  <option value="">Todos os produtos</option>
+                </select>
+              </div>
+              <div>
+                <label for="filtro-categoria">Categoria</label>
+                <select id="filtro-categoria">
+                  <option value="">Todas as categorias</option>
+                </select>
+              </div>
+              <div>
+                <label for="filtro-data_inicio">Data inicial</label>
+                <input id="filtro-data_inicio" type="date" aria-describedby="erro-filtro-data_inicio">
+                <div id="erro-filtro-data_inicio" class="erro-campo"></div>
+              </div>
+              <div>
+                <label for="filtro-data_fim">Data final</label>
+                <input id="filtro-data_fim" type="date" aria-describedby="erro-filtro-data_fim">
+                <div id="erro-filtro-data_fim" class="erro-campo"></div>
+              </div>
+            </div>
+            <div class="acoes">
+              <button type="submit" id="buscar">Buscar</button>
+              <button type="button" id="limpar-filtros" class="secundario">Limpar filtros</button>
+              <span id="filtros-ativos" class="filtros-ativos" role="status"></span>
+            </div>
+          </fieldset>
+        </form>
         <div class="tabela-rolagem">
           <table id="tabela-vendas">
             <thead>
@@ -289,6 +329,7 @@
           }
           grupos[produto.categoria].append(new Option(`${produto.nome} — ${moeda.format(produto.preco)}`, produto.id));
         }
+        preencherFiltrosDeProduto();
       } catch (erro) {
         if (erro instanceof NaoAutenticado) return;
         select.replaceChildren(new Option("Não foi possível carregar os produtos", ""));
@@ -464,7 +505,8 @@
     // --- Listagem, ordenação e exclusão (#3) ---------------------------------------------------------
 
     // Estado já exibido na tela. Só muda depois de uma resposta OK da API.
-    let listagem = { pagina: 1, totalPaginas: 1, ordenar: "data_venda", direcao: "desc" };
+    // `filtros` são os da busca avançada (#4) aplicados à tabela; vazio = listagem completa.
+    let listagem = { pagina: 1, totalPaginas: 1, ordenar: "data_venda", direcao: "desc", filtros: {} };
     let ultimaRequisicaoListagem = 0;
     // Seleção vale só para a página exibida: é limpa ao trocar de página ou de ordenação.
     const selecionadas = new Set();
@@ -513,7 +555,10 @@
       corpo.replaceChildren();
       if (!vendas.length) {
         const linha = document.createElement("tr");
-        const vazio = celula("Nenhuma venda cadastrada.", "vazio");
+        const vazio = celula(
+          Object.keys(listagem.filtros).length ? "Nenhuma venda encontrada com esses filtros." : "Nenhuma venda cadastrada.",
+          "vazio",
+        );
         vazio.colSpan = 8;
         linha.append(vazio);
         corpo.append(linha);
@@ -562,13 +607,18 @@
       const alvo = { ...listagem, ...mudancas };
       const numero = ++ultimaRequisicaoListagem;
       $("erro-listagem").textContent = "";
-      const parametros = new URLSearchParams({ pagina: alvo.pagina, ordenar: alvo.ordenar, direcao: alvo.direcao });
+      const parametros = new URLSearchParams({ ...alvo.filtros, pagina: alvo.pagina, ordenar: alvo.ordenar, direcao: alvo.direcao });
+      // Com filtros, usa a rota da busca avançada (#4); sem filtros, a listagem completa (#3).
+      const rota = Object.keys(alvo.filtros).length ? "/api/web/records/search" : "/api/web/records";
       try {
-        const { resposta, dados } = await chamarApi(`/api/web/records?${parametros}`);
+        const { resposta, dados } = await chamarApi(`${rota}?${parametros}`);
         // Outra requisição começou depois desta: a resposta está desatualizada e é descartada.
         if (numero !== ultimaRequisicaoListagem) return;
         if (!resposta.ok) {
-          $("erro-listagem").textContent = dados.erro || "Não foi possível carregar as vendas.";
+          // No 400, `campos` explica cada parâmetro recusado (ex.: período invertido na busca).
+          $("erro-listagem").textContent = dados.campos
+            ? Object.values(dados.campos).join(" ")
+            : dados.erro || "Não foi possível carregar as vendas.";
           return;
         }
         if (dados.pagina > dados.total_paginas) {
@@ -576,13 +626,18 @@
           return carregarListagem({ ...mudancas, pagina: dados.total_paginas });
         }
         const mudouVisao =
-          alvo.pagina !== listagem.pagina || alvo.ordenar !== listagem.ordenar || alvo.direcao !== listagem.direcao;
+          alvo.pagina !== listagem.pagina ||
+          alvo.ordenar !== listagem.ordenar ||
+          alvo.direcao !== listagem.direcao ||
+          JSON.stringify(alvo.filtros) !== JSON.stringify(listagem.filtros);
         if (mudouVisao) selecionadas.clear();
         listagem = { ...alvo, totalPaginas: dados.total_paginas };
         desenharTabela(dados.vendas);
         atualizarCabecalhos();
-        $("info-paginacao").textContent =
-          `Página ${dados.pagina} de ${dados.total_paginas} · ${dados.total} ${dados.total === 1 ? "venda" : "vendas"}`;
+        const filtrada = Object.keys(listagem.filtros).length > 0;
+        const contagem = `${dados.total} ${dados.total === 1 ? "venda" : "vendas"}${filtrada ? (dados.total === 1 ? " encontrada" : " encontradas") : ""}`;
+        $("info-paginacao").textContent = `Página ${dados.pagina} de ${dados.total_paginas} · ${contagem}`;
+        $("filtros-ativos").textContent = filtrada ? `Filtros aplicados: ${descreverFiltros(listagem.filtros)}.` : "";
         $("pagina-anterior").disabled = dados.pagina <= 1;
         $("proxima-pagina").disabled = dados.pagina >= dados.total_paginas;
       } catch (erro) {
@@ -602,6 +657,92 @@
         carregarListagem({ ordenar, direcao, pagina: 1 });
       });
     }
+
+    // --- Busca avançada com filtros combináveis (#4) -------------------------------------------------
+
+    const CAMPOS_FILTRO = ["produto_id", "categoria", "data_inicio", "data_fim"];
+
+    function preencherFiltrosDeProduto() {
+      const selectProduto = $("filtro-produto_id");
+      const selectCategoria = $("filtro-categoria");
+      const produtoEscolhido = selectProduto.value;
+      const categoriaEscolhida = selectCategoria.value;
+      selectProduto.replaceChildren(new Option("Todos os produtos", ""));
+      selectCategoria.replaceChildren(new Option("Todas as categorias", ""));
+      const grupos = {};
+      for (const produto of produtos) {
+        if (!grupos[produto.categoria]) {
+          grupos[produto.categoria] = document.createElement("optgroup");
+          grupos[produto.categoria].label = produto.categoria;
+          selectProduto.append(grupos[produto.categoria]);
+        }
+        grupos[produto.categoria].append(new Option(produto.nome, produto.id));
+      }
+      for (const categoria of Object.keys(grupos).sort()) selectCategoria.append(new Option(categoria, categoria));
+      selectProduto.value = produtoEscolhido;
+      selectCategoria.value = categoriaEscolhida;
+    }
+
+    function descreverFiltros(filtros) {
+      const partes = [];
+      if (filtros.produto_id) {
+        const produto = produtos.find((p) => String(p.id) === filtros.produto_id);
+        partes.push(`produto ${produto ? produto.nome : `nº ${filtros.produto_id}`}`);
+      }
+      if (filtros.categoria) partes.push(`categoria ${filtros.categoria}`);
+      if (filtros.data_inicio && filtros.data_fim)
+        partes.push(`de ${formatarData(filtros.data_inicio)} a ${formatarData(filtros.data_fim)}`);
+      else if (filtros.data_inicio) partes.push(`a partir de ${formatarData(filtros.data_inicio)}`);
+      else if (filtros.data_fim) partes.push(`até ${formatarData(filtros.data_fim)}`);
+      return partes.join(", ");
+    }
+
+    function limparErrosBusca() {
+      for (const campo of ["data_inicio", "data_fim"]) {
+        $(`erro-filtro-${campo}`).textContent = "";
+        $(`filtro-${campo}`).removeAttribute("aria-invalid");
+      }
+    }
+
+    function mostrarErroBusca(campo, mensagem) {
+      $(`erro-filtro-${campo}`).textContent = mensagem;
+      $(`filtro-${campo}`).setAttribute("aria-invalid", "true");
+    }
+
+    // Lê os filtros preenchidos. Retorna null (e mostra o erro) se o período for inválido.
+    function lerFiltros() {
+      limparErrosBusca();
+      const filtros = {};
+      for (const campo of CAMPOS_FILTRO) {
+        const elemento = $(`filtro-${campo}`);
+        if (elemento.value) filtros[campo] = elemento.value;
+        else if (elemento.validity.badInput) {
+          mostrarErroBusca(campo, "Data inválida.");
+          return null;
+        }
+      }
+      if (filtros.data_inicio && filtros.data_fim && filtros.data_inicio > filtros.data_fim) {
+        mostrarErroBusca("data_fim", "A data final não pode ser anterior à data inicial.");
+        $("filtro-data_fim").focus();
+        return null;
+      }
+      return filtros;
+    }
+
+    $("formulario-busca").addEventListener("submit", async (evento) => {
+      evento.preventDefault();
+      const filtros = lerFiltros();
+      if (!filtros) return;
+      $("sucesso-listagem").textContent = "";
+      await carregarListagem({ filtros, pagina: 1 });
+    });
+
+    $("limpar-filtros").addEventListener("click", () => {
+      $("formulario-busca").reset();
+      limparErrosBusca();
+      $("sucesso-listagem").textContent = "";
+      carregarListagem({ filtros: {}, pagina: 1 });
+    });
 
     $("selecionar-todas").addEventListener("change", (evento) => {
       const marcar = evento.target.checked;
@@ -687,7 +828,9 @@
       carregarProdutos();
       selecionadas.clear();
       $("sucesso-listagem").textContent = "";
-      carregarListagem({ pagina: 1 });
+      $("formulario-busca").reset();
+      limparErrosBusca();
+      carregarListagem({ pagina: 1, filtros: {} });
     }
 
     async function restaurarSessao() {
