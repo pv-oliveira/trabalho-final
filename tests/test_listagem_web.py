@@ -170,6 +170,7 @@ def test_empate_e_desfeito_pelo_id(cliente_http, cabecalho):
         ("pagina=%C2%B2", "pagina"),  # "²" passa em str.isdigit(), mas não é página válida
         ("pagina=100001", "pagina"),
         ("pagina=" + "9" * 5000, "pagina"),  # acima do limite de dígitos do int(): não pode virar 500
+        ("pagina=" + "1" * 5000, "pagina"),
         ("pagina=", "pagina"),
         ("ordenar=senha_hash", "ordenar"),
         ("ordenar=venda.id;DROP TABLE venda", "ordenar"),
