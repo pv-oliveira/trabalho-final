@@ -182,6 +182,66 @@ curl -i -X DELETE http://localhost:8080/api/web/records/1 -H "Authorization: Bea
 
 A listagem (leitura) e a exclusão registram uma linha na camada `api` e outra na camada `db`, com `client: "web"` e o mesmo `request_id`. Os valores de `operation` são `listar_vendas` e `excluir_venda`. Excluir uma venda inexistente gera `WARN` com `status: "error"` nas duas camadas. Parâmetros inválidos na listagem são recusados antes de chegar ao banco, então geram `WARN` só na camada `api`. Falhas no banco geram `ERROR`.
 
+## #4 — Busca avançada com filtros combináveis na Web
+
+### Usar pela Web
+
+1. Faça login em <http://localhost:8080>. O quadro **Busca avançada** fica no cartão **Vendas cadastradas**, acima da tabela.
+2. Preencha um ou mais filtros e clique em **Buscar**. A consulta é feita em segundo plano (`fetch`), sem recarregar a página, e a tabela passa a mostrar só as vendas encontradas. Abaixo dos botões aparece um resumo dos filtros aplicados, e o rodapé mostra quantas vendas foram encontradas.
+3. Paginação, ordenação pelas colunas, edição e exclusão continuam funcionando sobre o resultado da busca. Os filtros aplicados só mudam ao clicar em **Buscar** de novo: editar os campos sem buscar não altera a tabela.
+4. **Limpar filtros** apaga os campos e volta à listagem completa da #3, na primeira página.
+5. Se a data final for anterior à inicial, a página mostra o erro no campo e não faz a consulta. Se a API recusar algum filtro, a mensagem dela aparece abaixo da tabela, e a tabela continua com o último resultado válido.
+
+### Filtros disponíveis
+
+Os filtros são combinados com **E** (a venda precisa atender a todos os informados). Filtro ausente ou vazio não restringe a busca.
+
+| Parâmetro | No formulário | Regra |
+|---|---|---|
+| `produto_id` | Produto | Número de um produto do catálogo (inteiro positivo). Um número válido sem produto cadastrado devolve zero vendas |
+| `categoria` | Categoria | `Alimentos`, `Bebidas`, `Higiene` ou `Limpeza` (exatamente assim, com a inicial maiúscula) |
+| `data_inicio` | Data inicial | `AAAA-MM-DD`. Vendas a partir dessa data, inclusive |
+| `data_fim` | Data final | `AAAA-MM-DD`. Vendas até essa data, inclusive. Não pode ser anterior a `data_inicio` |
+
+`data_inicio` e `data_fim` formam o filtro de **período** e podem ser usados juntos ou separados. Além dos filtros, a busca aceita `pagina`, `ordenar` e `direcao`, com os mesmos valores e padrões da listagem da #3 (5 vendas por página).
+
+### Endpoint desta issue
+
+Exige `Authorization: Bearer <token>`. Sem token ou com token inválido, responde `401`.
+
+| Método | Rota | Resposta |
+|---|---|---|
+| GET | `/api/web/records/search` | `200 {"vendas", "pagina", "itens_por_pagina", "total", "total_paginas", "ordenar", "direcao", "filtros"}`; `400` filtros ou parâmetros inválidos |
+
+A resposta tem o mesmo formato da listagem da #3, mais `filtros`, com os filtros aplicados (`null` nos ausentes). O `total` e o `total_paginas` contam só as vendas encontradas. No `400`, `campos` traz a mensagem de cada parâmetro recusado:
+
+```json
+{"erro": "Parâmetros inválidos.", "campos": {"data_fim": "A data final não pode ser anterior à data inicial."}}
+```
+
+A consulta SQL é própria da busca Web (`buscar_vendas_web` no `db.py`). As condições do `WHERE` vêm de uma lista fixa e só entram as dos filtros informados. Os valores vão como parâmetros, então o texto enviado pelo usuário nunca entra no SQL. A contagem e a página são lidas na mesma transação, como na listagem.
+
+### Exemplos de uso
+
+Pelo terminal (com o `TOKEN` obtido como na #2):
+
+```bash
+# 1 filtro: vendas de Bebidas
+curl -s "http://localhost:8080/api/web/records/search?categoria=Bebidas" -H "Authorization: Bearer $TOKEN"
+
+# 2 filtros: vendas do produto 1 a partir de 01/10/2026
+curl -s "http://localhost:8080/api/web/records/search?produto_id=1&data_inicio=2026-10-01" \
+  -H "Authorization: Bearer $TOKEN"
+
+# 3 filtros: Alimentos em outubro de 2026, maiores valores primeiro, página 2
+curl -s "http://localhost:8080/api/web/records/search?categoria=Alimentos&data_inicio=2026-10-01&data_fim=2026-10-31&ordenar=valor_total&direcao=desc&pagina=2" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### Logs
+
+Cada busca registra uma linha na camada `api` e outra na camada `db`, com `client: "web"`, `operation: "buscar_vendas"` e o mesmo `request_id`. A `message` lista os nomes dos filtros usados (ex.: `Busca (categoria, data_inicio): 4 vendas, página 1 de 1`). Filtros ou parâmetros inválidos são recusados antes de chegar ao banco, então geram `WARN` só na camada `api`. Falhas no banco geram `ERROR`.
+
 ## Logs
 
 Cada evento é uma linha JSON no stdout, com `timestamp`, `level`, `layer` (`api`/`db`), `client` (`web`/`cli`), `operation`, `status`, `request_id` e `message`. API e banco compartilham o mesmo `request_id` dentro de uma requisição (também devolvido no header `X-Request-ID`). A inicialização do banco usa `client: "sistema"` e `request_id: "inicializacao"`. Erros não previstos na API viram `500 {"erro": "Erro interno"}` com log `ERROR`.
