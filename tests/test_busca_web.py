@@ -106,41 +106,52 @@ def test_rota_search_nao_e_confundida_com_id_de_venda(cliente_http, cabecalho, v
 # --- filtros combináveis (1, 2 e 3 filtros) --------------------------------------------------------
 
 
+# Os 3 filtros da especificação (§4.4): produto, categoria e período (data_inicio e/ou data_fim).
+OUTUBRO = {"data_inicio": "2026-10-01", "data_fim": "2026-10-31"}
+
+
 @pytest.mark.parametrize(
     "filtros, esperados",
     [
-        # nenhum filtro: todas as vendas
-        (
+        pytest.param(
             {},
             [
                 "arroz_set", "arroz_out", "arroz_nov", "feijao_out", "feijao_nov",
                 "refri_set", "refri_out", "suco_out", "sabonete_out", "sabonete_nov",
             ],
+            id="0-filtros",
         ),
         # 1 filtro
-        ({"produto_id": "Arroz 5 kg"}, ["arroz_set", "arroz_out", "arroz_nov"]),
-        ({"categoria": "Bebidas"}, ["refri_set", "refri_out", "suco_out"]),
-        ({"data_inicio": "2026-11-01"}, ["arroz_nov", "feijao_nov", "sabonete_nov"]),
-        ({"data_fim": "2026-09-30"}, ["arroz_set", "refri_set"]),
-        # 2 filtros
-        ({"categoria": "Alimentos", "data_inicio": "2026-11-01"}, ["arroz_nov", "feijao_nov"]),
-        ({"produto_id": "Refrigerante 2 L", "data_fim": "2026-09-30"}, ["refri_set"]),
-        ({"data_inicio": "2026-10-01", "data_fim": "2026-10-31"},
-         ["arroz_out", "feijao_out", "refri_out", "suco_out", "sabonete_out"]),
-        ({"produto_id": "Sabonete", "categoria": "Higiene"}, ["sabonete_out", "sabonete_nov"]),
-        # 3 filtros (o período conta como dois parâmetros)
-        ({"categoria": "Alimentos", "data_inicio": "2026-10-01", "data_fim": "2026-10-31"}, ["arroz_out", "feijao_out"]),
-        ({"produto_id": "Arroz 5 kg", "data_inicio": "2026-10-01", "data_fim": "2026-10-31"}, ["arroz_out"]),
-        ({"produto_id": "Feijão 1 kg", "categoria": "Alimentos", "data_inicio": "2026-11-01"}, ["feijao_nov"]),
-        # todos os filtros
-        (
-            {"produto_id": "Refrigerante 2 L", "categoria": "Bebidas", "data_inicio": "2026-10-01", "data_fim": "2026-10-31"},
-            ["refri_out"],
+        pytest.param({"produto_id": "Arroz 5 kg"}, ["arroz_set", "arroz_out", "arroz_nov"], id="1-produto"),
+        pytest.param({"categoria": "Bebidas"}, ["refri_set", "refri_out", "suco_out"], id="1-categoria"),
+        pytest.param(
+            OUTUBRO, ["arroz_out", "feijao_out", "refri_out", "suco_out", "sabonete_out"], id="1-periodo-completo"
         ),
-        # combinações sem resultado
-        ({"produto_id": "Arroz 5 kg", "categoria": "Bebidas"}, []),
-        ({"categoria": "Limpeza"}, []),
-        ({"data_inicio": "2026-10-13", "data_fim": "2026-10-14"}, []),
+        pytest.param({"data_inicio": "2026-11-01"}, ["arroz_nov", "feijao_nov", "sabonete_nov"], id="1-periodo-so-inicio"),
+        pytest.param({"data_fim": "2026-09-30"}, ["arroz_set", "refri_set"], id="1-periodo-so-fim"),
+        pytest.param({"categoria": "Limpeza"}, [], id="1-categoria-sem-vendas"),
+        # 2 filtros
+        pytest.param({"produto_id": "Sabonete", "categoria": "Higiene"}, ["sabonete_out", "sabonete_nov"], id="2-produto-categoria"),
+        pytest.param({"produto_id": "Arroz 5 kg", "categoria": "Bebidas"}, [], id="2-produto-de-outra-categoria"),
+        pytest.param({"produto_id": "Arroz 5 kg", **OUTUBRO}, ["arroz_out"], id="2-produto-periodo"),
+        pytest.param({"produto_id": "Refrigerante 2 L", "data_fim": "2026-09-30"}, ["refri_set"], id="2-produto-periodo-so-fim"),
+        pytest.param({"categoria": "Alimentos", **OUTUBRO}, ["arroz_out", "feijao_out"], id="2-categoria-periodo"),
+        pytest.param(
+            {"categoria": "Alimentos", "data_inicio": "2026-11-01"}, ["arroz_nov", "feijao_nov"], id="2-categoria-periodo-so-inicio"
+        ),
+        # 3 filtros
+        pytest.param({"produto_id": "Refrigerante 2 L", "categoria": "Bebidas", **OUTUBRO}, ["refri_out"], id="3-todos"),
+        pytest.param(
+            {"produto_id": "Feijão 1 kg", "categoria": "Alimentos", "data_inicio": "2026-11-01"},
+            ["feijao_nov"],
+            id="3-todos-periodo-so-inicio",
+        ),
+        pytest.param({"produto_id": "Arroz 5 kg", "categoria": "Bebidas", **OUTUBRO}, [], id="3-produto-de-outra-categoria"),
+        pytest.param(
+            {"produto_id": "Sabonete", "categoria": "Higiene", "data_inicio": "2026-10-13", "data_fim": "2026-10-14"},
+            [],
+            id="3-periodo-sem-vendas",
+        ),
     ],
 )
 def test_filtros_combinados_retornam_as_vendas_certas(cliente_http, cabecalho, vendas, filtros, esperados):
