@@ -68,6 +68,11 @@
     .situacao.disponivel .ponto { background: var(--sucesso); }
     .situacao.indisponivel .ponto { background: var(--perigo); }
     .oculto { display: none !important; }
+    /* Esconde só visualmente: o texto continua disponível para leitores de tela. */
+    .visualmente-oculto {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+    }
     .cartao + .cartao { margin-top: 1.5rem; }
     .cabecalho-cartao { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-end; justify-content: space-between; }
     .cabecalho-cartao h2 { margin: 0; }
@@ -199,7 +204,7 @@
                 <th data-coluna="categoria"><button type="button" class="ordenar">Categoria <span class="seta"></span></button></th>
                 <th data-coluna="quantidade" class="numero"><button type="button" class="ordenar">Qtd. <span class="seta"></span></button></th>
                 <th data-coluna="valor_total" class="numero"><button type="button" class="ordenar">Valor total <span class="seta"></span></button></th>
-                <th><span class="oculto">Ações</span></th>
+                <th><span class="visualmente-oculto">Ações</span></th>
               </tr>
             </thead>
             <tbody id="corpo-tabela"></tbody>
@@ -241,6 +246,7 @@
     const moeda = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
     let produtos = [];
     let idEmEdicao = null;
+    let formularioAlterado = false;
 
     class NaoAutenticado extends Error {}
 
@@ -351,6 +357,7 @@
       $("cancelar-edicao").classList.add("oculto");
       limparErrosVenda();
       atualizarTotal();
+      formularioAlterado = false;
     }
 
     function prepararEdicao(venda) {
@@ -364,7 +371,12 @@
       $("cancelar-edicao").classList.remove("oculto");
       limparErrosVenda();
       atualizarTotal();
+      formularioAlterado = false;
     }
+
+    // Preencher campos por código não dispara estes eventos; só o que o usuário digita ou escolhe conta.
+    $("formulario-venda").addEventListener("input", () => (formularioAlterado = true));
+    $("formulario-venda").addEventListener("change", () => (formularioAlterado = true));
 
     $("produto_id").addEventListener("change", () => {
       const produto = produtos.find((p) => String(p.id) === $("produto_id").value);
@@ -380,6 +392,9 @@
     });
 
     async function carregarVendaParaEdicao(id) {
+      if (formularioAlterado && !confirm("Há alterações não salvas no formulário. Descartar e carregar outra venda?")) {
+        return false;
+      }
       $("sucesso-venda").textContent = "";
       limparErrosVenda();
       try {
@@ -448,7 +463,10 @@
 
     // --- Listagem, ordenação e exclusão (#3) ---------------------------------------------------------
 
-    const listagem = { pagina: 1, totalPaginas: 1, ordenar: "data_venda", direcao: "desc" };
+    // Estado já exibido na tela. Só muda depois de uma resposta OK da API.
+    let listagem = { pagina: 1, totalPaginas: 1, ordenar: "data_venda", direcao: "desc" };
+    let ultimaRequisicaoListagem = 0;
+    // Seleção vale só para a página exibida: é limpa ao trocar de página ou de ordenação.
     const selecionadas = new Set();
     const ROTULOS_DIRECAO = { asc: "ascending", desc: "descending" };
 
@@ -533,47 +551,49 @@
       }
     }
 
-    async function carregarListagem() {
+    // Carrega a listagem com as mudanças pedidas (ex.: { pagina: 2 }). Sem argumento, recarrega a atual.
+    async function carregarListagem(mudancas = {}) {
+      const alvo = { ...listagem, ...mudancas };
+      const numero = ++ultimaRequisicaoListagem;
       $("erro-listagem").textContent = "";
-      const parametros = new URLSearchParams({
-        pagina: listagem.pagina,
-        ordenar: listagem.ordenar,
-        direcao: listagem.direcao,
-      });
+      const parametros = new URLSearchParams({ pagina: alvo.pagina, ordenar: alvo.ordenar, direcao: alvo.direcao });
       try {
         const { resposta, dados } = await chamarApi(`/api/web/records?${parametros}`);
+        // Outra requisição começou depois desta: a resposta está desatualizada e é descartada.
+        if (numero !== ultimaRequisicaoListagem) return;
         if (!resposta.ok) {
           $("erro-listagem").textContent = dados.erro || "Não foi possível carregar as vendas.";
           return;
         }
-        listagem.totalPaginas = dados.total_paginas;
-        if (listagem.pagina > dados.total_paginas) {
-          // A página ficou vazia (ex.: depois de excluir os últimos itens): volta para a última existente.
-          listagem.pagina = dados.total_paginas;
-          return carregarListagem();
+        if (dados.pagina > dados.total_paginas) {
+          // A página ficou vazia (ex.: depois de excluir os últimos itens): vai para a última existente.
+          return carregarListagem({ ...mudancas, pagina: dados.total_paginas });
         }
+        const mudouVisao =
+          alvo.pagina !== listagem.pagina || alvo.ordenar !== listagem.ordenar || alvo.direcao !== listagem.direcao;
+        if (mudouVisao) selecionadas.clear();
+        listagem = { ...alvo, totalPaginas: dados.total_paginas };
         desenharTabela(dados.vendas);
         atualizarCabecalhos();
-        atualizarSelecao();
         $("info-paginacao").textContent =
           `Página ${dados.pagina} de ${dados.total_paginas} · ${dados.total} ${dados.total === 1 ? "venda" : "vendas"}`;
         $("pagina-anterior").disabled = dados.pagina <= 1;
         $("proxima-pagina").disabled = dados.pagina >= dados.total_paginas;
       } catch (erro) {
-        if (!(erro instanceof NaoAutenticado)) $("erro-listagem").textContent = "Não foi possível conectar à API.";
+        if (numero === ultimaRequisicaoListagem && !(erro instanceof NaoAutenticado))
+          $("erro-listagem").textContent = "Não foi possível conectar à API.";
+      } finally {
+        if (numero === ultimaRequisicaoListagem) atualizarSelecao();
       }
     }
 
     for (const th of document.querySelectorAll("#tabela-vendas th[data-coluna]")) {
       th.querySelector("button").addEventListener("click", () => {
-        const coluna = th.dataset.coluna;
-        if (listagem.ordenar === coluna) listagem.direcao = listagem.direcao === "asc" ? "desc" : "asc";
-        else {
-          listagem.ordenar = coluna;
-          listagem.direcao = coluna === "produto_nome" || coluna === "categoria" ? "asc" : "desc";
-        }
-        listagem.pagina = 1;
-        carregarListagem();
+        const ordenar = th.dataset.coluna;
+        let direcao;
+        if (listagem.ordenar === ordenar) direcao = listagem.direcao === "asc" ? "desc" : "asc";
+        else direcao = ordenar === "produto_nome" || ordenar === "categoria" ? "asc" : "desc";
+        carregarListagem({ ordenar, direcao, pagina: 1 });
       });
     }
 
@@ -586,18 +606,18 @@
     });
 
     $("pagina-anterior").addEventListener("click", () => {
-      if (listagem.pagina > 1) {
-        listagem.pagina -= 1;
-        carregarListagem();
-      }
+      if (listagem.pagina > 1) carregarListagem({ pagina: listagem.pagina - 1 });
     });
 
     $("proxima-pagina").addEventListener("click", () => {
-      if (listagem.pagina < listagem.totalPaginas) {
-        listagem.pagina += 1;
-        carregarListagem();
-      }
+      if (listagem.pagina < listagem.totalPaginas) carregarListagem({ pagina: listagem.pagina + 1 });
     });
+
+    async function excluirVenda(id) {
+      const { resposta, dados } = await chamarApi(`/api/web/records/${id}`, { method: "DELETE" });
+      // 404: outra sessão já excluiu; para quem está na tela, o resultado é o mesmo.
+      if (!resposta.ok && resposta.status !== 404) throw new Error(dados.erro || "erro");
+    }
 
     $("excluir-selecionadas").addEventListener("click", async () => {
       const ids = [...selecionadas].sort((a, b) => a - b);
@@ -609,26 +629,28 @@
       $("sucesso-listagem").textContent = "";
       const botao = $("excluir-selecionadas");
       botao.disabled = true;
-      const excluidas = [];
-      const falhas = [];
-      try {
-        for (const id of ids) {
-          const { resposta, dados } = await chamarApi(`/api/web/records/${id}`, { method: "DELETE" });
-          // 404: outra sessão já excluiu; para quem está na tela, o resultado é o mesmo.
-          if (resposta.ok || resposta.status === 404) excluidas.push(id);
-          else falhas.push(`nº ${id}: ${dados.erro || "erro"}`);
-        }
-      } catch (erro) {
-        if (erro instanceof NaoAutenticado) return;
-        falhas.push("não foi possível conectar à API");
-      }
+      // Todas em paralelo: uma falha não impede as outras, e cada id tem o seu resultado.
+      const resultados = await Promise.allSettled(ids.map(excluirVenda));
+      if (resultados.some((r) => r.status === "rejected" && r.reason instanceof NaoAutenticado)) return;
+
+      const excluidas = ids.filter((_, i) => resultados[i].status === "fulfilled");
+      const falhas = ids
+        .map((id, i) => [id, resultados[i]])
+        .filter(([, r]) => r.status === "rejected")
+        .map(([id, r]) => `nº ${id} (${r.reason instanceof TypeError ? "sem conexão com a API" : r.reason.message})`);
       for (const id of excluidas) selecionadas.delete(id);
       if (excluidas.includes(idEmEdicao)) prepararNovaVenda();
+      await carregarListagem();
+      // Mensagens depois da recarga, que limpa a área de erro; um erro da própria recarga é mantido.
       if (excluidas.length)
         $("sucesso-listagem").textContent =
           excluidas.length === 1 ? `Venda nº ${excluidas[0]} excluída.` : `${excluidas.length} vendas excluídas.`;
-      if (falhas.length) $("erro-listagem").textContent = `Não foi possível excluir: ${falhas.join("; ")}.`;
-      await carregarListagem();
+      if (falhas.length) {
+        const erroRecarga = $("erro-listagem").textContent;
+        $("erro-listagem").textContent = [`Não foi possível excluir: ${falhas.join("; ")}.`, erroRecarga].filter(Boolean).join(" ");
+      }
+      // As que falharam continuam selecionadas, e o botão volta a funcionar mesmo se a recarga falhar.
+      atualizarSelecao();
     });
 
     function mostrarLogin() {
@@ -651,9 +673,8 @@
       $("sucesso-venda").textContent = "";
       carregarProdutos();
       selecionadas.clear();
-      listagem.pagina = 1;
       $("sucesso-listagem").textContent = "";
-      carregarListagem();
+      carregarListagem({ pagina: 1 });
     }
 
     async function restaurarSessao() {

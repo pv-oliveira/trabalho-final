@@ -147,8 +147,9 @@ Cada operação registra uma linha na camada `api` e outra na camada `db`, com `
 1. Faça login em <http://localhost:8080>. O cartão **Vendas cadastradas** carrega as vendas do banco assim que a página abre.
 2. **Colunas:** Nº, Data, Produto, Categoria, Qtd. e Valor total, com **5 vendas por página**. Use **‹ Anterior** e **Próxima ›** para navegar; o rodapé mostra a página atual, o total de páginas e o total de vendas.
 3. **Ordenar:** clique no título de uma coluna. Um clique ordena por ela; outro inverte a direção (▲ crescente, ▼ decrescente). A ordem inicial é por data, da mais recente para a mais antiga.
-4. **Selecionar e excluir:** marque as caixas das vendas (ou a caixa do cabeçalho, para todas as da página) e clique em **Excluir selecionadas (N)**. Depois da confirmação, as vendas são excluídas do banco e a tabela é recarregada. Se a página ficar vazia, a tabela volta para a última página existente.
-5. **Editar:** o botão **Editar** de cada linha carrega a venda no formulário da #2. Ao salvar ou cadastrar uma venda, a tabela é atualizada.
+4. **Selecionar e excluir:** marque as caixas das vendas (ou a caixa do cabeçalho, para todas as da página) e clique em **Excluir selecionadas (N)**. A seleção vale só para a página exibida: trocar de página ou de ordenação a limpa, para nunca excluir uma venda que não está na tela. Depois da confirmação, as exclusões são feitas em paralelo e a tabela é recarregada; se alguma falhar, a mensagem diz quais, e elas continuam selecionadas para tentar de novo. Se a página ficar vazia, a tabela volta para a última página existente.
+5. **Editar:** o botão **Editar** de cada linha carrega a venda no formulário da #2. Se o formulário tiver alterações não salvas, a página pede confirmação antes de descartá-las. Ao salvar ou cadastrar uma venda, a tabela é atualizada.
+6. **Falhas:** se a API responder erro ou estiver fora, a tabela continua mostrando a última página carregada com sucesso, e o próximo clique parte dela. Cliques rápidos em sequência mostram sempre o resultado do último.
 
 ### Endpoints desta issue
 
@@ -167,7 +168,7 @@ Parâmetros da listagem, na query string (todos opcionais):
 | `ordenar` | `id`, `data_venda`, `produto_nome`, `categoria`, `quantidade`, `valor_total` | `data_venda` |
 | `direcao` | `asc` ou `desc` | `desc` |
 
-Cada página tem 5 vendas, no mesmo formato devolvido pela #2. Em caso de empate na coluna escolhida, o `id` desempata, para que nenhuma venda se repita ou suma entre as páginas. Uma página depois da última volta com `vendas: []` e o `total_paginas` atual. A coluna de ordenação vem de uma lista fixa no `db.py`, então o texto enviado pelo usuário nunca entra no SQL.
+Cada página tem 5 vendas, no mesmo formato devolvido pela #2. A contagem e a página são lidas na mesma transação (`REPEATABLE READ`), então o `total` sempre bate com as vendas devolvidas. Em caso de empate na coluna escolhida, o `id` desempata, para que nenhuma venda se repita ou suma entre as páginas. Uma página depois da última volta com `vendas: []` e o `total_paginas` atual. A coluna de ordenação vem de uma lista fixa no `db.py`, então o texto enviado pelo usuário nunca entra no SQL.
 
 Pelo terminal (com o `TOKEN` obtido como na #2):
 

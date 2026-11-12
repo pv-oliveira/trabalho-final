@@ -248,6 +248,9 @@ def listar_vendas_web(pagina, itens_por_pagina, ordenar, direcao, request_id):
     ).format(coluna=sql.SQL(COLUNAS_ORDENACAO_WEB[ordenar]), sentido=sentido)
     try:
         with obter_conexao() as conexao:
+            # REPEATABLE READ: a contagem e a página veem o mesmo snapshot, então o total
+            # bate com as linhas devolvidas mesmo se outra sessão alterar vendas no meio.
+            conexao.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
             total = conexao.execute("SELECT COUNT(*) AS total FROM venda").fetchone()["total"]
             linhas = conexao.execute(consulta, (itens_por_pagina, (pagina - 1) * itens_por_pagina)).fetchall()
     except psycopg.Error:

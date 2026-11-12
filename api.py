@@ -326,6 +326,13 @@ def web_editar_venda(id_venda):
     return jsonify(venda_para_json(linha)), 200
 
 
+def pagina_valida(texto):
+    """Página entre 1 e PAGINA_MAXIMA. Testa o tamanho antes de converter: o int() do Python
+    recusa textos com mais de 4300 dígitos, o que viraria um 500 em vez de 400."""
+    digitos = texto.lstrip("0") if FORMATO_ID.fullmatch(texto) else ""
+    return bool(digitos) and len(digitos) <= len(str(PAGINA_MAXIMA)) and int(digitos) <= PAGINA_MAXIMA
+
+
 @app.get("/api/web/records")
 @exigir_autenticacao_web("listar_vendas")
 def web_listar_vendas():
@@ -334,7 +341,7 @@ def web_listar_vendas():
     direcao = request.args.get("direcao", "desc")
 
     erros = {}
-    if not FORMATO_ID.fullmatch(pagina) or not 1 <= int(pagina) <= PAGINA_MAXIMA:
+    if not pagina_valida(pagina):
         erros["pagina"] = f"A página deve ser um número inteiro entre 1 e {PAGINA_MAXIMA}."
     if ordenar not in db.COLUNAS_ORDENACAO_WEB:
         erros["ordenar"] = f"Ordene por: {', '.join(db.COLUNAS_ORDENACAO_WEB)}."
@@ -344,7 +351,7 @@ def web_listar_vendas():
         registrar_log("WARN", "web", "listar_vendas", "error", f"Parâmetros inválidos: {', '.join(sorted(erros))}")
         return jsonify(erro="Parâmetros inválidos.", campos=erros), 400
 
-    pagina = int(pagina)
+    pagina = int(pagina.lstrip("0"))  # já validada por pagina_valida
     try:
         linhas, total = db.listar_vendas_web(pagina, ITENS_POR_PAGINA, ordenar, direcao, g.request_id)
     except psycopg.Error:

@@ -141,6 +141,11 @@ def test_ordenacao_por_coluna(cliente_http, cabecalho, sete_vendas, ordenar, dir
     assert [v[ordenar] for v in corpo["vendas"]] == esperado
 
 
+def test_pagina_com_zeros_a_esquerda_e_aceita(cliente_http, cabecalho, sete_vendas):
+    corpo = cliente_http.get("/api/web/records?pagina=" + "0" * 5000 + "2", headers=cabecalho).get_json()
+    assert corpo["pagina"] == 2 and len(corpo["vendas"]) == 2
+
+
 def test_ordenacao_por_id_e_estavel_entre_paginas(cliente_http, cabecalho, sete_vendas):
     ids = []
     for pagina in (1, 2):
@@ -164,6 +169,8 @@ def test_empate_e_desfeito_pelo_id(cliente_http, cabecalho):
         ("pagina=1.5", "pagina"),
         ("pagina=%C2%B2", "pagina"),  # "²" passa em str.isdigit(), mas não é página válida
         ("pagina=100001", "pagina"),
+        ("pagina=" + "9" * 5000, "pagina"),  # acima do limite de dígitos do int(): não pode virar 500
+        ("pagina=", "pagina"),
         ("ordenar=senha_hash", "ordenar"),
         ("ordenar=venda.id;DROP TABLE venda", "ordenar"),
         ("direcao=cima", "direcao"),
