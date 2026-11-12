@@ -468,6 +468,8 @@
     let ultimaRequisicaoListagem = 0;
     // Seleção vale só para a página exibida: é limpa ao trocar de página ou de ordenação.
     const selecionadas = new Set();
+    // Enquanto a exclusão roda, a seleção fica travada e o botão desabilitado (evita um segundo laço).
+    let excluindo = false;
     const ROTULOS_DIRECAO = { asc: "ascending", desc: "descending" };
 
     function formatarData(iso) {
@@ -493,12 +495,16 @@
 
     function atualizarSelecao() {
       const caixas = [...document.querySelectorAll("#corpo-tabela input[type=checkbox]")];
-      for (const caixa of caixas) caixa.closest("tr").classList.toggle("selecionada", caixa.checked);
+      for (const caixa of caixas) {
+        caixa.closest("tr").classList.toggle("selecionada", caixa.checked);
+        caixa.disabled = excluindo;
+      }
+      $("selecionar-todas").disabled = excluindo;
       const marcadas = caixas.filter((caixa) => caixa.checked).length;
       $("selecionar-todas").checked = caixas.length > 0 && marcadas === caixas.length;
       $("selecionar-todas").indeterminate = marcadas > 0 && marcadas < caixas.length;
       const botao = $("excluir-selecionadas");
-      botao.disabled = selecionadas.size === 0;
+      botao.disabled = excluindo || selecionadas.size === 0;
       botao.textContent = selecionadas.size ? `Excluir selecionadas (${selecionadas.size})` : "Excluir selecionadas";
     }
 
@@ -620,6 +626,7 @@
     }
 
     $("excluir-selecionadas").addEventListener("click", async () => {
+      if (excluindo) return;
       const ids = [...selecionadas].sort((a, b) => a - b);
       if (!ids.length) return;
       const descricao = ids.length === 1 ? `a venda nº ${ids[0]}` : `${ids.length} vendas (nº ${ids.join(", ")})`;
@@ -627,30 +634,36 @@
 
       $("erro-listagem").textContent = "";
       $("sucesso-listagem").textContent = "";
-      const botao = $("excluir-selecionadas");
-      botao.disabled = true;
-      // Todas em paralelo: uma falha não impede as outras, e cada id tem o seu resultado.
-      const resultados = await Promise.allSettled(ids.map(excluirVenda));
-      if (resultados.some((r) => r.status === "rejected" && r.reason instanceof NaoAutenticado)) return;
-
-      const excluidas = ids.filter((_, i) => resultados[i].status === "fulfilled");
-      const falhas = ids
-        .map((id, i) => [id, resultados[i]])
-        .filter(([, r]) => r.status === "rejected")
-        .map(([id, r]) => `nº ${id} (${r.reason instanceof TypeError ? "sem conexão com a API" : r.reason.message})`);
-      for (const id of excluidas) selecionadas.delete(id);
-      if (excluidas.includes(idEmEdicao)) prepararNovaVenda();
-      await carregarListagem();
-      // Mensagens depois da recarga, que limpa a área de erro; um erro da própria recarga é mantido.
-      if (excluidas.length)
-        $("sucesso-listagem").textContent =
-          excluidas.length === 1 ? `Venda nº ${excluidas[0]} excluída.` : `${excluidas.length} vendas excluídas.`;
-      if (falhas.length) {
-        const erroRecarga = $("erro-listagem").textContent;
-        $("erro-listagem").textContent = [`Não foi possível excluir: ${falhas.join("; ")}.`, erroRecarga].filter(Boolean).join(" ");
-      }
-      // As que falharam continuam selecionadas, e o botão volta a funcionar mesmo se a recarga falhar.
+      excluindo = true;
       atualizarSelecao();
+      try {
+        // Todas em paralelo: uma falha não impede as outras, e cada id tem o seu resultado.
+        const resultados = await Promise.allSettled(ids.map(excluirVenda));
+        if (resultados.some((r) => r.status === "rejected" && r.reason instanceof NaoAutenticado)) return;
+
+        const excluidas = ids.filter((_, i) => resultados[i].status === "fulfilled");
+        const falhas = ids
+          .map((id, i) => [id, resultados[i]])
+          .filter(([, r]) => r.status === "rejected")
+          .map(([id, r]) => `nº ${id} (${r.reason instanceof TypeError ? "sem conexão com a API" : r.reason.message})`);
+        for (const id of excluidas) selecionadas.delete(id);
+        if (excluidas.includes(idEmEdicao)) prepararNovaVenda();
+        await carregarListagem();
+        // Mensagens depois da recarga, que limpa a área de erro; um erro da própria recarga é mantido.
+        if (excluidas.length)
+          $("sucesso-listagem").textContent =
+            excluidas.length === 1 ? `Venda nº ${excluidas[0]} excluída.` : `${excluidas.length} vendas excluídas.`;
+        if (falhas.length) {
+          const erroRecarga = $("erro-listagem").textContent;
+          $("erro-listagem").textContent = [`Não foi possível excluir: ${falhas.join("; ")}.`, erroRecarga]
+            .filter(Boolean)
+            .join(" ");
+        }
+      } finally {
+        // As que falharam continuam selecionadas, e o botão volta a funcionar mesmo se a recarga falhar.
+        excluindo = false;
+        atualizarSelecao();
+      }
     });
 
     function mostrarLogin() {
