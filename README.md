@@ -243,6 +243,77 @@ curl -s "http://localhost:8080/api/web/records/search?categoria=Alimentos&data_i
 
 Cada busca registra uma linha na camada `api` e outra na camada `db`, com `client: "web"`, `operation: "buscar_vendas"` e o mesmo `request_id`. A `message` lista os nomes dos filtros usados (ex.: `Busca (categoria, data_inicio): 4 vendas, página 1 de 1`). Filtros ou parâmetros inválidos são recusados antes de chegar ao banco, então geram `WARN` só na camada `api`. Falhas no banco geram `ERROR`.
 
+## #5 — Exportação CSV na Web
+
+### Exportar pela Web
+
+1. Faça login em <http://localhost:8080> e, se quiser, aplique filtros na **Busca avançada** (#4) e escolha a ordenação clicando nas colunas.
+2. Clique em **Exportar CSV**, no cabeçalho do cartão **Vendas cadastradas**. O navegador baixa um arquivo `vendas-AAAAMMDD-HHMMSS.csv`, com a data e a hora no fuso `FUSO_HORARIO`.
+3. O arquivo traz **todas** as vendas dos filtros aplicados, e não só a página que está na tela, na mesma ordenação da tabela. Sem filtros, traz todas as vendas cadastradas.
+
+Valem os filtros **aplicados**, os que aparecem em "Filtros aplicados": campos editados sem clicar em **Buscar** não entram na exportação. Se a API recusar algum parâmetro ou estiver fora do ar, a mensagem aparece abaixo da tabela. Uma sessão expirada volta para a tela de login.
+
+### Formato do arquivo
+
+O CSV segue o formato que o Excel em português abre direto, com colunas, acentos e números corretos:
+
+- codificação UTF-8 com BOM e linhas terminadas em CRLF;
+- separador `;` e campos com `;` ou aspas entre aspas (padrão CSV);
+- datas em `DD/MM/AAAA` e valores com vírgula decimal e 2 casas, sem separador de milhar.
+
+| Coluna | Conteúdo |
+|---|---|
+| `Nº` | Número da venda |
+| `Data` | Data da venda |
+| `Produto` | Nome do produto |
+| `Categoria` | Categoria do produto |
+| `Quantidade` | Quantidade vendida |
+| `Valor unitário` | Valor unitário praticado na venda |
+| `Valor total` | Quantidade × valor unitário |
+
+```text
+Nº;Data;Produto;Categoria;Quantidade;Valor unitário;Valor total
+12;02/11/2026;Arroz 5 kg;Alimentos;3;26,00;78,00
+9;20/10/2026;Refrigerante 2 L;Bebidas;2;9,90;19,80
+```
+
+Sem nenhuma venda nos filtros, o arquivo traz só a linha de cabeçalho.
+
+### Endpoint desta issue
+
+Exige `Authorization: Bearer <token>`. Sem token ou com token inválido, responde `401`.
+
+| Método | Rota | Resposta |
+|---|---|---|
+| GET | `/api/web/records/export` | `200` com o CSV; `400` filtros ou parâmetros inválidos |
+
+Aceita os filtros da busca da #4 (`produto_id`, `categoria`, `data_inicio`, `data_fim`), com as mesmas regras, e `ordenar`/`direcao` da listagem da #3 (padrão: data mais recente primeiro). Não há `pagina`: o arquivo sempre traz todos os resultados. No `400`, a resposta é JSON, igual à da busca (`{"erro": "Parâmetros inválidos.", "campos": {...}}`).
+
+Cabeçalhos da resposta `200`:
+
+- `Content-Type: text/csv; charset=utf-8`
+- `Content-Disposition: attachment; filename="vendas-AAAAMMDD-HHMMSS.csv"`
+- `Cache-Control: no-store`, para o navegador não guardar em cache os dados de quem está logado
+
+A consulta SQL é própria da exportação Web (`exportar_vendas_web` no `db.py`): o mesmo `JOIN` e as mesmas condições de filtro da busca (`CONDICOES_BUSCA_WEB`), mas sem `LIMIT`/`OFFSET`. Os valores vão como parâmetros, como na busca.
+
+### Exemplos de uso
+
+Pelo terminal (com o `TOKEN` obtido como na #2), o `-OJ` salva o arquivo com o nome enviado pela API:
+
+```bash
+# todas as vendas
+curl -s -OJ "http://localhost:8080/api/web/records/export" -H "Authorization: Bearer $TOKEN"
+
+# Bebidas em outubro de 2026, maiores valores primeiro
+curl -s -OJ "http://localhost:8080/api/web/records/export?categoria=Bebidas&data_inicio=2026-10-01&data_fim=2026-10-31&ordenar=valor_total&direcao=desc" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### Logs
+
+Cada exportação registra uma linha na camada `api` e outra na camada `db`, com `client: "web"`, `operation: "exportar_vendas"` e o mesmo `request_id`. A `message` traz a quantidade de vendas e os nomes dos filtros usados (ex.: `4 vendas exportadas em vendas-20261113-104500.csv (categoria, data_inicio)`). Parâmetros inválidos geram `WARN` só na camada `api`, e falhas no banco geram `ERROR`.
+
 ## Logs
 
 Cada evento é uma linha JSON no stdout, com `timestamp`, `level`, `layer` (`api`/`db`), `client` (`web`/`cli`), `operation`, `status`, `request_id` e `message`. API e banco compartilham o mesmo `request_id` dentro de uma requisição (também devolvido no header `X-Request-ID`). A inicialização do banco usa `client: "sistema"` e `request_id: "inicializacao"`. Erros não previstos na API viram `500 {"erro": "Erro interno"}` com log `ERROR`.
