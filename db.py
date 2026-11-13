@@ -241,6 +241,12 @@ CONDICOES_BUSCA_WEB = {
 CAMPOS_BUSCA_WEB = tuple(CONDICOES_BUSCA_WEB)
 
 
+def _onde_busca_web(filtros):
+    """Monta o WHERE com as condições dos filtros informados (vazio se não houver nenhum)."""
+    condicoes = [sql.SQL(CONDICOES_BUSCA_WEB[campo]) for campo in CAMPOS_BUSCA_WEB if campo in filtros]
+    return sql.SQL("WHERE ") + sql.SQL(" AND ").join(condicoes) if condicoes else sql.SQL("")
+
+
 def buscar_vendas_web(filtros, pagina, itens_por_pagina, ordenar, direcao, request_id, operacao="buscar_vendas"):
     """Retorna (vendas da página, total de vendas encontradas) para a tabela da Web.
 
@@ -248,8 +254,7 @@ def buscar_vendas_web(filtros, pagina, itens_por_pagina, ordenar, direcao, reque
     `ordenar` deve ser uma chave de COLUNAS_ORDENACAO_WEB e `direcao`, "asc" ou "desc".
     O id desempata a ordenação, para a paginação ser estável. `operacao` vai para os logs.
     """
-    condicoes = [sql.SQL(CONDICOES_BUSCA_WEB[campo]) for campo in CAMPOS_BUSCA_WEB if campo in filtros]
-    onde = sql.SQL("WHERE ") + sql.SQL(" AND ").join(condicoes) if condicoes else sql.SQL("")
+    onde = _onde_busca_web(filtros)
     sentido = sql.SQL("DESC" if direcao == "desc" else "ASC")
     contagem = sql.SQL(
         "SELECT COUNT(*) AS total FROM venda JOIN produto ON produto.id = venda.produto_id {onde}"
@@ -289,6 +294,42 @@ def buscar_vendas_web(filtros, pagina, itens_por_pagina, ordenar, direcao, reque
 def listar_vendas_web(pagina, itens_por_pagina, ordenar, direcao, request_id):
     """Retorna (vendas da página, total de vendas) para a listagem completa da Web."""
     return buscar_vendas_web({}, pagina, itens_por_pagina, ordenar, direcao, request_id, operacao="listar_vendas")
+
+
+def exportar_vendas_web(filtros, ordenar, direcao, request_id):
+    """Retorna todas as vendas que atendem aos filtros, sem paginação, para o CSV da Web.
+
+    Mesmos filtros (`filtros`) e mesma ordenação (`ordenar`, `direcao`) da tabela, com o id
+    desempatando. Sem filtros, retorna todas as vendas.
+    """
+    consulta = sql.SQL(
+        """
+        SELECT venda.id, venda.data_venda, produto.nome AS produto_nome, produto.categoria,
+               venda.quantidade, venda.valor_unitario, venda.valor_total
+        FROM venda JOIN produto ON produto.id = venda.produto_id
+        {onde}
+        ORDER BY {coluna} {sentido}, venda.id {sentido}
+        """
+    ).format(
+        onde=_onde_busca_web(filtros),
+        coluna=sql.SQL(COLUNAS_ORDENACAO_WEB[ordenar]),
+        sentido=sql.SQL("DESC" if direcao == "desc" else "ASC"),
+    )
+    try:
+        with obter_conexao() as conexao:
+            linhas = conexao.execute(consulta, filtros).fetchall()
+    except psycopg.Error:
+        registrar_log("ERROR", "web", "exportar_vendas", "error", request_id, "Falha ao exportar vendas")
+        raise
+    registrar_log(
+        "INFO",
+        "web",
+        "exportar_vendas",
+        "success",
+        request_id,
+        f"{len(linhas)} vendas lidas para exportação ({', '.join(sorted(filtros)) or 'sem filtros'})",
+    )
+    return linhas
 
 
 def excluir_venda_web(id_venda, request_id):
