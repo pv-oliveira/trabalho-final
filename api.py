@@ -1,5 +1,7 @@
 """API REST (Flask) consumida pela Web e, futuramente, pela CLI."""
 
+import csv
+import io
 import os
 import re
 import uuid
@@ -9,7 +11,7 @@ from functools import wraps
 from zoneinfo import ZoneInfo
 
 import psycopg
-from flask import Flask, g, jsonify, request
+from flask import Flask, Response, g, jsonify, request
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -349,18 +351,23 @@ def ler_pagina(texto):
     return ler_inteiro_positivo(texto, PAGINA_MAXIMA)
 
 
-def ler_paginacao(erros):
-    """Lê `pagina`, `ordenar` e `direcao` da query string, anotando os inválidos em `erros`."""
-    pagina = request.args.get("pagina", "1")
+def ler_ordenacao(erros):
+    """Lê `ordenar` e `direcao` da query string, anotando os inválidos em `erros`."""
     ordenar = request.args.get("ordenar", "data_venda")
     direcao = request.args.get("direcao", "desc")
-    numero_pagina = ler_pagina(pagina)
-    if numero_pagina is None:
-        erros["pagina"] = f"A página deve ser um número inteiro entre 1 e {PAGINA_MAXIMA}."
     if ordenar not in db.COLUNAS_ORDENACAO_WEB:
         erros["ordenar"] = f"Ordene por: {', '.join(db.COLUNAS_ORDENACAO_WEB)}."
     if direcao not in ("asc", "desc"):
         erros["direcao"] = "A direção deve ser asc ou desc."
+    return ordenar, direcao
+
+
+def ler_paginacao(erros):
+    """Lê `pagina`, `ordenar` e `direcao` da query string, anotando os inválidos em `erros`."""
+    numero_pagina = ler_pagina(request.args.get("pagina", "1"))
+    if numero_pagina is None:
+        erros["pagina"] = f"A página deve ser um número inteiro entre 1 e {PAGINA_MAXIMA}."
+    ordenar, direcao = ler_ordenacao(erros)
     return numero_pagina, ordenar, direcao
 
 
@@ -473,6 +480,66 @@ def web_buscar_vendas():
     corpo = corpo_da_pagina(linhas, total, pagina, ordenar, direcao)
     corpo["filtros"] = filtros_para_json(filtros)
     return jsonify(corpo), 200
+
+
+# CSV da Web no formato do Excel em português: separador ";", vírgula decimal, data DD/MM/AAAA
+# e UTF-8 com BOM (sem o BOM, o Excel lê os acentos errado).
+CABECALHO_CSV = ("Nº", "Data", "Produto", "Categoria", "Quantidade", "Valor unitário", "Valor total")
+
+
+def valor_csv(valor):
+    """Decimal com 2 casas e vírgula decimal, sem separador de milhar (ex.: 1234,50)."""
+    return f"{valor:.2f}".replace(".", ",")
+
+
+def gerar_csv(linhas):
+    saida = io.StringIO()
+    escritor = csv.writer(saida, delimiter=";", lineterminator="\r\n")
+    escritor.writerow(CABECALHO_CSV)
+    for linha in linhas:
+        escritor.writerow(
+            (
+                linha["id"],
+                linha["data_venda"].strftime("%d/%m/%Y"),
+                linha["produto_nome"],
+                linha["categoria"],
+                linha["quantidade"],
+                valor_csv(linha["valor_unitario"]),
+                valor_csv(linha["valor_total"]),
+            )
+        )
+    return "\ufeff" + saida.getvalue()  # BOM do UTF-8
+
+
+@app.get("/api/web/records/export")
+@exigir_autenticacao_web("exportar_vendas")
+def web_exportar_vendas():
+    erros = {}
+    filtros = ler_filtros_busca(erros)
+    ordenar, direcao = ler_ordenacao(erros)
+    if erros:
+        return resposta_parametros_invalidos("exportar_vendas", erros)
+
+    try:
+        linhas = db.exportar_vendas_web(filtros, ordenar, direcao, g.request_id)
+    except psycopg.Error:
+        return resposta_falha_no_banco("exportar_vendas")
+    nome_arquivo = f"vendas-{datetime.now(fuso_horario()):%Y%m%d-%H%M%S}.csv"
+    registrar_log(
+        "INFO",
+        "web",
+        "exportar_vendas",
+        "success",
+        f"{len(linhas)} vendas exportadas em {nome_arquivo} ({', '.join(sorted(filtros)) or 'sem filtros'})",
+    )
+    return Response(
+        gerar_csv(linhas),
+        mimetype="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{nome_arquivo}"',
+            "Cache-Control": "no-store",  # dados de quem está logado: não guardar em cache
+        },
+    )
 
 
 @app.delete("/api/web/records/<id_venda>")
