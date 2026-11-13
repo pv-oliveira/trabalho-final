@@ -76,6 +76,7 @@
     .cartao + .cartao { margin-top: 1.5rem; }
     .cabecalho-cartao { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-end; justify-content: space-between; }
     .cabecalho-cartao h2 { margin: 0; }
+    .acoes-cabecalho { display: flex; flex-wrap: wrap; gap: 0.75rem; }
     .carregar-venda { display: flex; gap: 0.5rem; align-items: flex-end; }
     .carregar-venda label { margin-top: 0; }
     .carregar-venda input { width: 7rem; }
@@ -199,7 +200,10 @@
       <div class="cartao" id="cartao-listagem">
         <div class="cabecalho-cartao">
           <h2>Vendas cadastradas</h2>
-          <button type="button" id="excluir-selecionadas" class="perigo" disabled>Excluir selecionadas</button>
+          <div class="acoes-cabecalho">
+            <button type="button" id="exportar-csv" class="secundario">Exportar CSV</button>
+            <button type="button" id="excluir-selecionadas" class="perigo" disabled>Excluir selecionadas</button>
+          </div>
         </div>
         <form id="formulario-busca" novalidate>
           <fieldset>
@@ -776,6 +780,51 @@
 
     $("proxima-pagina").addEventListener("click", () => {
       if (!excluindo && listagem.pagina < listagem.totalPaginas) carregarListagem({ pagina: listagem.pagina + 1 });
+    });
+
+    // --- Exportação CSV (#5) -------------------------------------------------------------------------
+
+    // Exporta todas as vendas dos filtros aplicados (não só a página atual), na ordenação da tabela.
+    // Usa os filtros de `listagem`, e não os do formulário: o CSV corresponde ao que a tabela mostra.
+    $("exportar-csv").addEventListener("click", async () => {
+      const botao = $("exportar-csv");
+      if (botao.disabled) return;
+      botao.disabled = true;
+      $("erro-listagem").textContent = "";
+      $("sucesso-listagem").textContent = "";
+      const parametros = new URLSearchParams({ ...listagem.filtros, ordenar: listagem.ordenar, direcao: listagem.direcao });
+      try {
+        // fetch direto (e não chamarApi): a resposta é um arquivo, não JSON.
+        const resposta = await fetch(`/api/web/records/export?${parametros}`, {
+          headers: { Authorization: `Bearer ${sessionStorage.getItem(CHAVE_TOKEN)}` },
+        });
+        if (resposta.status === 401) {
+          mostrarLogin();
+          return;
+        }
+        if (!resposta.ok) {
+          const dados = await resposta.json().catch(() => ({}));
+          $("erro-listagem").textContent = dados.campos
+            ? Object.values(dados.campos).join(" ")
+            : dados.erro || "Não foi possível exportar as vendas.";
+          return;
+        }
+        const disposicao = resposta.headers.get("Content-Disposition") || "";
+        const nome = /filename="([^"]+)"/.exec(disposicao)?.[1] || "vendas.csv";
+        const endereco = URL.createObjectURL(await resposta.blob());
+        const link = document.createElement("a");
+        link.href = endereco;
+        link.download = nome;
+        document.body.append(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(endereco), 1000);
+        $("sucesso-listagem").textContent = `Arquivo ${nome} gerado.`;
+      } catch (erro) {
+        $("erro-listagem").textContent = "Não foi possível conectar à API.";
+      } finally {
+        botao.disabled = false;
+      }
     });
 
     async function excluirVenda(id) {
