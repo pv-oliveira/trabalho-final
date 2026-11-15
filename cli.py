@@ -6,6 +6,9 @@ Execução (via Docker Compose, sem instalar nada no host):
     docker compose run --rm cli saude
     docker compose run --rm cli login --usuario admin
     TOKEN_CLI=<token> docker compose run --rm cli sessao
+    TOKEN_CLI=<token> docker compose run --rm cli produtos
+    TOKEN_CLI=<token> docker compose run --rm cli criar --produto 1 --quantidade 3 --valor-unitario 25.50 --data 2026-10-15
+    TOKEN_CLI=<token> docker compose run --rm cli editar 7 --produto 1 --quantidade 5 --valor-unitario 25.50 --data 2026-10-15
 """
 
 import argparse
@@ -15,7 +18,9 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
+from decimal import Decimal
 
 URL_API_PADRAO = "http://api:8000"
 TEMPO_LIMITE = 10  # segundos
@@ -25,6 +30,14 @@ VARIAVEL_TOKEN = "TOKEN_CLI"
 SAIDA_SUCESSO = 0
 SAIDA_ERRO = 1
 SAIDA_NAO_AUTENTICADO = 3
+
+# Campos da venda na API -> opção da CLI, para mostrar cada erro do 422 junto da opção que o causou.
+OPCOES_VENDA = {
+    "produto_id": "--produto",
+    "quantidade": "--quantidade",
+    "valor_unitario": "--valor-unitario",
+    "data_venda": "--data",
+}
 
 
 class ErroDaApi(Exception):
@@ -40,6 +53,12 @@ class ErroDaApi(Exception):
         if isinstance(self.corpo, dict) and isinstance(self.corpo.get("erro"), str):
             return self.corpo["erro"]
         return "resposta inesperada da API"
+
+    @property
+    def campos(self):
+        """Erros por campo (`{"campo": "mensagem"}`) que a API devolve no 422, ou {} se não houver."""
+        campos = self.corpo.get("campos") if isinstance(self.corpo, dict) else None
+        return campos if isinstance(campos, dict) else {}
 
 
 class ApiIndisponivel(Exception):
@@ -168,11 +187,84 @@ def comando_login(argumentos):
     return SAIDA_SUCESSO
 
 
+def moeda(texto):
+    """Valor da API ("1234.50") em reais no formato brasileiro ("R$ 1.234,50")."""
+    return "R$ " + f"{Decimal(texto):,.2f}".translate(str.maketrans(",.", ".,"))
+
+
+def data_brasileira(texto):
+    """Data da API ("2026-10-15") no formato brasileiro ("15/10/2026")."""
+    ano, mes, dia = texto.split("-")
+    return f"{dia}/{mes}/{ano}"
+
+
+def inteiro_ou_texto(texto):
+    """Converte para int só o que for número inteiro; o resto vai como texto e a API o recusa com a mensagem da Web."""
+    return int(texto) if texto.isascii() and texto.isdigit() else texto
+
+
+def venda_dos_argumentos(argumentos):
+    """Corpo JSON da venda, com os mesmos campos do formulário da Web."""
+    return {
+        "produto_id": inteiro_ou_texto(argumentos.produto),
+        "quantidade": inteiro_ou_texto(argumentos.quantidade),
+        "valor_unitario": argumentos.valor_unitario,
+        "data_venda": argumentos.data,
+    }
+
+
+def resumo_da_venda(venda):
+    return (
+        f"{venda['quantidade']} × {venda['produto_nome']}, total {moeda(venda['valor_total'])}, "
+        f"em {data_brasileira(venda['data_venda'])}"
+    )
+
+
 def comando_sessao(_argumentos):
     """Comando protegido: GET /api/cli/sessao com Authorization: Bearer <TOKEN_CLI>."""
     corpo = requisitar("GET", "/sessao", token=token_do_ambiente())
     print(f"Autenticado como {corpo['nome']} ({corpo['usuario']})")
     return SAIDA_SUCESSO
+
+
+def comando_produtos(_argumentos):
+    """Comando protegido: GET /api/cli/produtos. Mostra o catálogo com o id usado em --produto."""
+    produtos = requisitar("GET", "/produtos", token=token_do_ambiente())["produtos"]
+    largura_nome = max([len("Produto"), *(len(p["nome"]) for p in produtos)])
+    largura_categoria = max([len("Categoria"), *(len(p["categoria"]) for p in produtos)])
+    print(f"{'ID':>4}  {'Produto':<{largura_nome}}  {'Categoria':<{largura_categoria}}  Preço")
+    for produto in produtos:
+        print(
+            f"{produto['id']:>4}  {produto['nome']:<{largura_nome}}  "
+            f"{produto['categoria']:<{largura_categoria}}  {moeda(produto['preco'])}"
+        )
+    return SAIDA_SUCESSO
+
+
+def comando_criar(argumentos):
+    """Comando protegido: POST /api/cli/records."""
+    venda = requisitar("POST", "/records", venda_dos_argumentos(argumentos), token=token_do_ambiente())
+    print(f"Venda nº {venda['id']} cadastrada: {resumo_da_venda(venda)}.")
+    return SAIDA_SUCESSO
+
+
+def comando_editar(argumentos):
+    """Comando protegido: PUT /api/cli/records/{id}. Substitui todos os campos, como a edição da Web."""
+    caminho = f"/records/{urllib.parse.quote(argumentos.id, safe='')}"
+    venda = requisitar("PUT", caminho, venda_dos_argumentos(argumentos), token=token_do_ambiente())
+    print(f"Venda nº {venda['id']} atualizada: {resumo_da_venda(venda)}.")
+    return SAIDA_SUCESSO
+
+
+def _adicionar_campos_venda(parser):
+    """As 4 opções obrigatórias da venda, as mesmas do formulário da Web."""
+    obrigatorias = parser.add_argument_group("campos da venda (obrigatórios)")
+    obrigatorias.add_argument("--produto", required=True, metavar="ID", help="id do produto (veja o comando 'produtos')")
+    obrigatorias.add_argument("--quantidade", required=True, metavar="N", help="número inteiro de 1 a 10000")
+    obrigatorias.add_argument(
+        "--valor-unitario", required=True, metavar="VALOR", help="em reais, com ponto decimal (ex.: 25.50); até 100000.00"
+    )
+    obrigatorias.add_argument("--data", required=True, metavar="AAAA-MM-DD", help="data da venda, que não pode ser futura")
 
 
 def _traduzir_ajuda(parser):
@@ -206,6 +298,24 @@ def criar_parser():
     sessao = subcomandos.add_parser("sessao", help=f"mostra o usuário do token em {VARIAVEL_TOKEN} (protegido)")
     _traduzir_ajuda(sessao).set_defaults(funcao=comando_sessao)
 
+    produtos = subcomandos.add_parser("produtos", help="lista o catálogo de produtos (protegido)")
+    _traduzir_ajuda(produtos).set_defaults(funcao=comando_produtos)
+
+    criar = subcomandos.add_parser(
+        "criar", help="cadastra uma venda (protegido)", description="Cadastra uma venda. Mesmos campos e validações da Web."
+    )
+    _adicionar_campos_venda(_traduzir_ajuda(criar))
+    criar.set_defaults(funcao=comando_criar)
+
+    editar = subcomandos.add_parser(
+        "editar",
+        help="edita uma venda (protegido)",
+        description="Edita uma venda, substituindo todos os campos (como a edição da Web).",
+    )
+    _traduzir_ajuda(editar).add_argument("id", help="número da venda")
+    _adicionar_campos_venda(editar)
+    editar.set_defaults(funcao=comando_editar)
+
     return parser
 
 
@@ -225,6 +335,8 @@ def main(argv=None):
         return SAIDA_NAO_AUTENTICADO
     except ErroDaApi as erro:
         print(f"Erro: {erro.mensagem} (HTTP {erro.status})", file=sys.stderr)
+        for campo, mensagem in erro.campos.items():
+            print(f"  {OPCOES_VENDA.get(campo, campo)}: {mensagem}", file=sys.stderr)
         if erro.status == 401 and argumentos.comando != "login":
             print(f"Token ausente, inválido ou expirado. Gere outro com 'login' e atualize {VARIAVEL_TOKEN}.", file=sys.stderr)
         return SAIDA_NAO_AUTENTICADO if erro.status == 401 else SAIDA_ERRO
