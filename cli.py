@@ -208,7 +208,8 @@ def venda_dos_argumentos(argumentos):
     return {
         "produto_id": inteiro_ou_texto(argumentos.produto),
         "quantidade": inteiro_ou_texto(argumentos.quantidade),
-        "valor_unitario": argumentos.valor_unitario,
+        # Aceita a vírgula decimal, como os valores que a CLI mostra (R$ 27,90); a API valida o resto.
+        "valor_unitario": argumentos.valor_unitario.replace(",", "."),
         "data_venda": argumentos.data,
     }
 
@@ -262,7 +263,10 @@ def _adicionar_campos_venda(parser):
     obrigatorias.add_argument("--produto", required=True, metavar="ID", help="id do produto (veja o comando 'produtos')")
     obrigatorias.add_argument("--quantidade", required=True, metavar="N", help="número inteiro de 1 a 10000")
     obrigatorias.add_argument(
-        "--valor-unitario", required=True, metavar="VALOR", help="em reais, com ponto decimal (ex.: 25.50); até 100000.00"
+        "--valor-unitario",
+        required=True,
+        metavar="VALOR",
+        help="em reais, com vírgula ou ponto decimal (ex.: 25,50); até 100000,00",
     )
     obrigatorias.add_argument("--data", required=True, metavar="AAAA-MM-DD", help="data da venda, que não pode ser futura")
 

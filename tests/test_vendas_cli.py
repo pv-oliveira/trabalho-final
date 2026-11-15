@@ -353,6 +353,18 @@ def test_criar_cadastra_e_a_venda_aparece_na_web(com_token, cliente_http, token,
     assert na_web.get_json()["valor_total"] == "76.50"
 
 
+def test_criar_aceita_virgula_no_valor_unitario(com_token, capsys):
+    capsys.readouterr()
+    assert cli.main(["criar", *_opcoes(**{"valor-unitario": "25,50"})]) == 0
+    assert _saida_da_cli(capsys)[0].endswith("total R$ 76,50, em 15/10/2026.")
+
+
+def test_virgula_com_casas_demais_e_recusada_pela_api(com_token, capsys):
+    capsys.readouterr()
+    assert cli.main(["criar", *_opcoes(**{"valor-unitario": "1,234"})]) == cli.SAIDA_ERRO
+    assert "  --valor-unitario: O valor unitário deve ser maior que zero" in capsys.readouterr().err
+
+
 def test_criar_com_campos_invalidos_mostra_cada_erro_com_a_opcao(com_token, capsys):
     capsys.readouterr()
     opcoes = _opcoes(quantidade="0", **{"valor-unitario": "abc", "data": AMANHA})

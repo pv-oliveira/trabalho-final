@@ -470,7 +470,7 @@ As 4 opções são obrigatórias nos dois comandos, como no formulário da Web, 
 |---|---|---|
 | `--produto` | `produto_id` | Id de um produto existente no catálogo (veja `produtos`) |
 | `--quantidade` | `quantidade` | Inteiro de 1 a 10000 |
-| `--valor-unitario` | `valor_unitario` | Maior que 0, até 100000.00, com no máximo 2 casas decimais e **ponto** decimal (`25.50`) |
+| `--valor-unitario` | `valor_unitario` | Maior que 0, até 100000.00, com no máximo 2 casas decimais; aceita vírgula ou ponto decimal (`25,50` ou `25.50`) |
 | `--data` | `data_venda` | Data válida em `AAAA-MM-DD`, que não pode ser futura no fuso `FUSO_HORARIO` |
 
 ### Exemplos
