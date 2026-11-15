@@ -146,18 +146,28 @@ def _venda_completa(conexao, id_venda):
     ).fetchone()
 
 
-def listar_produtos_web(request_id):
-    """Retorna o catálogo de produtos para o select do formulário da Web."""
+def _listar_produtos(request_id, origem):
+    """Retorna o catálogo de produtos, por categoria e nome."""
     try:
         with obter_conexao() as conexao:
             linhas = conexao.execute(
                 "SELECT id, nome, categoria, preco FROM produto ORDER BY categoria, nome"
             ).fetchall()
     except psycopg.Error:
-        registrar_log("ERROR", "web", "listar_produtos", "error", request_id, "Falha ao listar produtos")
+        registrar_log("ERROR", origem, "listar_produtos", "error", request_id, "Falha ao listar produtos")
         raise
-    registrar_log("INFO", "web", "listar_produtos", "success", request_id, f"{len(linhas)} produtos listados")
+    registrar_log("INFO", origem, "listar_produtos", "success", request_id, f"{len(linhas)} produtos listados")
     return linhas
+
+
+def listar_produtos_web(request_id):
+    """Catálogo para o select do formulário da Web."""
+    return _listar_produtos(request_id, "web")
+
+
+def listar_produtos_cli(request_id):
+    """Catálogo para o comando `produtos` da CLI."""
+    return _listar_produtos(request_id, "cli")
 
 
 def consultar_venda_web(id_venda, request_id):
@@ -175,7 +185,7 @@ def consultar_venda_web(id_venda, request_id):
     return linha
 
 
-def criar_venda_web(venda, request_id):
+def _criar_venda(venda, request_id, origem):
     """Insere a venda e a retorna completa. Lança ProdutoInexistente se o produto não existir."""
     try:
         with obter_conexao() as conexao:
@@ -189,16 +199,26 @@ def criar_venda_web(venda, request_id):
             ).fetchone()["id"]
             linha = _venda_completa(conexao, id_venda)
     except psycopg.errors.ForeignKeyViolation:
-        registrar_log("WARN", "web", "criar_venda", "error", request_id, "Produto inexistente")
+        registrar_log("WARN", origem, "criar_venda", "error", request_id, "Produto inexistente")
         raise ProdutoInexistente from None
     except psycopg.Error:
-        registrar_log("ERROR", "web", "criar_venda", "error", request_id, "Falha ao criar venda")
+        registrar_log("ERROR", origem, "criar_venda", "error", request_id, "Falha ao criar venda")
         raise
-    registrar_log("INFO", "web", "criar_venda", "success", request_id, f"Venda {id_venda} criada")
+    registrar_log("INFO", origem, "criar_venda", "success", request_id, f"Venda {id_venda} criada")
     return linha
 
 
-def editar_venda_web(id_venda, venda, request_id):
+def criar_venda_web(venda, request_id):
+    """Cadastro pelo formulário da Web."""
+    return _criar_venda(venda, request_id, "web")
+
+
+def criar_venda_cli(venda, request_id):
+    """Cadastro pelo comando `criar` da CLI."""
+    return _criar_venda(venda, request_id, "cli")
+
+
+def _editar_venda(id_venda, venda, request_id, origem):
     """Atualiza todos os campos da venda e a retorna completa, ou None se ela não existir.
 
     Lança ProdutoInexistente se o produto não existir.
@@ -216,16 +236,26 @@ def editar_venda_web(id_venda, venda, request_id):
             ).fetchone()
             linha = _venda_completa(conexao, id_venda) if atualizada else None
     except psycopg.errors.ForeignKeyViolation:
-        registrar_log("WARN", "web", "editar_venda", "error", request_id, "Produto inexistente")
+        registrar_log("WARN", origem, "editar_venda", "error", request_id, "Produto inexistente")
         raise ProdutoInexistente from None
     except psycopg.Error:
-        registrar_log("ERROR", "web", "editar_venda", "error", request_id, "Falha ao editar venda")
+        registrar_log("ERROR", origem, "editar_venda", "error", request_id, "Falha ao editar venda")
         raise
     if linha is None:
-        registrar_log("WARN", "web", "editar_venda", "error", request_id, f"Venda {id_venda} não encontrada")
+        registrar_log("WARN", origem, "editar_venda", "error", request_id, f"Venda {id_venda} não encontrada")
     else:
-        registrar_log("INFO", "web", "editar_venda", "success", request_id, f"Venda {id_venda} atualizada")
+        registrar_log("INFO", origem, "editar_venda", "success", request_id, f"Venda {id_venda} atualizada")
     return linha
+
+
+def editar_venda_web(id_venda, venda, request_id):
+    """Edição pelo formulário da Web."""
+    return _editar_venda(id_venda, venda, request_id, "web")
+
+
+def editar_venda_cli(id_venda, venda, request_id):
+    """Edição pelo comando `editar` da CLI."""
+    return _editar_venda(id_venda, venda, request_id, "cli")
 
 
 # Colunas pelas quais a listagem da Web pode ser ordenada (nome do parâmetro -> coluna SQL).

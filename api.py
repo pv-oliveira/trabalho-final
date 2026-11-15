@@ -315,11 +315,11 @@ def ler_venda_da_requisicao(operacao):
     """Lê e valida o corpo JSON. Retorna (venda, None) ou (None, resposta de erro)."""
     dados = request.get_json(silent=True)
     if not isinstance(dados, dict):
-        registrar_log("WARN", "web", operacao, "error", "Corpo da requisição não é um objeto JSON")
+        registrar_log("WARN", origem_da_requisicao(), operacao, "error", "Corpo da requisição não é um objeto JSON")
         return None, (jsonify(erro="Envie os dados da venda em JSON."), 400)
     venda, erros = validar_venda(dados)
     if erros:
-        registrar_log("WARN", "web", operacao, "error", f"Dados inválidos: {', '.join(sorted(erros))}")
+        registrar_log("WARN", origem_da_requisicao(), operacao, "error", f"Dados inválidos: {', '.join(sorted(erros))}")
         return None, (jsonify(erro="Dados inválidos.", campos=erros), 422)
     return venda, None
 
@@ -328,7 +328,7 @@ def ler_id_venda(texto, operacao):
     """Converte o id da rota. Retorna (id, None) ou (None, resposta de erro)."""
     digitos = texto.lstrip("0") if FORMATO_ID.fullmatch(texto) else ""
     if not digitos:
-        registrar_log("WARN", "web", operacao, "error", "Número da venda inválido")
+        registrar_log("WARN", origem_da_requisicao(), operacao, "error", "Número da venda inválido")
         return None, (jsonify(erro="Número da venda inválido."), 400)
     # Mais dígitos que o maior INTEGER: a venda não existe. Testar o tamanho antes evita converter textos enormes.
     if len(digitos) > len(str(ID_MAXIMO)) or int(digitos) > ID_MAXIMO:
@@ -337,33 +337,73 @@ def ler_id_venda(texto, operacao):
 
 
 def resposta_produto_inexistente(operacao):
-    registrar_log("WARN", "web", operacao, "error", "Produto inexistente")
+    registrar_log("WARN", origem_da_requisicao(), operacao, "error", "Produto inexistente")
     return jsonify(erro="Dados inválidos.", campos={"produto_id": "Produto não encontrado."}), 422
 
 
 def resposta_venda_nao_encontrada(operacao, id_venda):
-    registrar_log("WARN", "web", operacao, "error", f"Venda {id_venda} não encontrada")
+    registrar_log("WARN", origem_da_requisicao(), operacao, "error", f"Venda {id_venda} não encontrada")
     return jsonify(erro="Venda não encontrada."), 404
 
 
 def resposta_falha_no_banco(operacao):
-    registrar_log("ERROR", "web", operacao, "error", "Falha ao acessar o banco")
+    registrar_log("ERROR", origem_da_requisicao(), operacao, "error", "Falha ao acessar o banco")
     return jsonify(erro="Erro interno"), 500
 
 
-@app.get("/api/web/produtos")
-@exigir_autenticacao_web("listar_produtos")
-def web_listar_produtos():
+def listar_produtos(listar_no_banco):
+    """Catálogo de produtos (Web e CLI). `listar_no_banco` é a consulta do cliente da rota."""
     try:
-        linhas = db.listar_produtos_web(g.request_id)
+        linhas = listar_no_banco(g.request_id)
     except psycopg.Error:
         return resposta_falha_no_banco("listar_produtos")
     produtos = [
         {"id": linha["id"], "nome": linha["nome"], "categoria": linha["categoria"], "preco": str(linha["preco"])}
         for linha in linhas
     ]
-    registrar_log("INFO", "web", "listar_produtos", "success", f"{len(produtos)} produtos listados")
+    registrar_log("INFO", origem_da_requisicao(), "listar_produtos", "success", f"{len(produtos)} produtos listados")
     return jsonify(produtos=produtos), 200
+
+
+def criar_venda(criar_no_banco):
+    """Valida o corpo e cria a venda (Web e CLI). `criar_no_banco` é a consulta do cliente da rota."""
+    venda, erro = ler_venda_da_requisicao("criar_venda")
+    if erro:
+        return erro
+    try:
+        linha = criar_no_banco(venda, g.request_id)
+    except db.ProdutoInexistente:
+        return resposta_produto_inexistente("criar_venda")
+    except psycopg.Error:
+        return resposta_falha_no_banco("criar_venda")
+    registrar_log("INFO", origem_da_requisicao(), "criar_venda", "success", f"Venda {linha['id']} criada")
+    return jsonify(venda_para_json(linha)), 201
+
+
+def editar_venda(texto_id, editar_no_banco):
+    """Valida o id e o corpo e substitui todos os campos da venda (Web e CLI)."""
+    id_venda, erro = ler_id_venda(texto_id, "editar_venda")
+    if erro:
+        return erro
+    venda, erro = ler_venda_da_requisicao("editar_venda")
+    if erro:
+        return erro
+    try:
+        linha = editar_no_banco(id_venda, venda, g.request_id)
+    except db.ProdutoInexistente:
+        return resposta_produto_inexistente("editar_venda")
+    except psycopg.Error:
+        return resposta_falha_no_banco("editar_venda")
+    if linha is None:
+        return resposta_venda_nao_encontrada("editar_venda", id_venda)
+    registrar_log("INFO", origem_da_requisicao(), "editar_venda", "success", f"Venda {id_venda} atualizada")
+    return jsonify(venda_para_json(linha)), 200
+
+
+@app.get("/api/web/produtos")
+@exigir_autenticacao_web("listar_produtos")
+def web_listar_produtos():
+    return listar_produtos(db.listar_produtos_web)
 
 
 @app.get("/api/web/records/<id_venda>")
@@ -385,38 +425,31 @@ def web_consultar_venda(id_venda):
 @app.post("/api/web/records")
 @exigir_autenticacao_web("criar_venda")
 def web_criar_venda():
-    venda, erro = ler_venda_da_requisicao("criar_venda")
-    if erro:
-        return erro
-    try:
-        linha = db.criar_venda_web(venda, g.request_id)
-    except db.ProdutoInexistente:
-        return resposta_produto_inexistente("criar_venda")
-    except psycopg.Error:
-        return resposta_falha_no_banco("criar_venda")
-    registrar_log("INFO", "web", "criar_venda", "success", f"Venda {linha['id']} criada")
-    return jsonify(venda_para_json(linha)), 201
+    return criar_venda(db.criar_venda_web)
 
 
 @app.put("/api/web/records/<id_venda>")
 @exigir_autenticacao_web("editar_venda")
 def web_editar_venda(id_venda):
-    id_venda, erro = ler_id_venda(id_venda, "editar_venda")
-    if erro:
-        return erro
-    venda, erro = ler_venda_da_requisicao("editar_venda")
-    if erro:
-        return erro
-    try:
-        linha = db.editar_venda_web(id_venda, venda, g.request_id)
-    except db.ProdutoInexistente:
-        return resposta_produto_inexistente("editar_venda")
-    except psycopg.Error:
-        return resposta_falha_no_banco("editar_venda")
-    if linha is None:
-        return resposta_venda_nao_encontrada("editar_venda", id_venda)
-    registrar_log("INFO", "web", "editar_venda", "success", f"Venda {id_venda} atualizada")
-    return jsonify(venda_para_json(linha)), 200
+    return editar_venda(id_venda, db.editar_venda_web)
+
+
+@app.get("/api/cli/produtos")
+@exigir_autenticacao_cli("listar_produtos")
+def cli_listar_produtos():
+    return listar_produtos(db.listar_produtos_cli)
+
+
+@app.post("/api/cli/records")
+@exigir_autenticacao_cli("criar_venda")
+def cli_criar_venda():
+    return criar_venda(db.criar_venda_cli)
+
+
+@app.put("/api/cli/records/<id_venda>")
+@exigir_autenticacao_cli("editar_venda")
+def cli_editar_venda(id_venda):
+    return editar_venda(id_venda, db.editar_venda_cli)
 
 
 def ler_inteiro_positivo(texto, maximo):
