@@ -12,7 +12,6 @@ from pathlib import Path
 
 import psycopg
 import pytest
-from werkzeug.serving import make_server
 
 import api
 import cli
@@ -168,20 +167,6 @@ def test_erro_inesperado_em_rota_cli_registra_client_cli(cliente_http, monkeypat
 
 
 # --- CLI (cli.py) contra a API real, num servidor HTTP local --------------------------
-
-
-@pytest.fixture
-def servidor_api(monkeypatch):
-    """Sobe a API num servidor HTTP de verdade (porta livre) e aponta URL_API da CLI para ele."""
-    servidor = make_server("127.0.0.1", 0, api.app, threaded=True)
-    thread = threading.Thread(target=servidor.serve_forever, daemon=True)
-    thread.start()
-    monkeypatch.setenv("URL_API", f"http://127.0.0.1:{servidor.server_port}/")
-    monkeypatch.delenv("TOKEN_CLI", raising=False)
-    monkeypatch.delenv("SENHA_CLI", raising=False)
-    yield
-    servidor.shutdown()
-    thread.join()
 
 
 def _token_pela_cli(capsys, monkeypatch):

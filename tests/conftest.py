@@ -1,9 +1,11 @@
 import json
 import os
 import sys
+import threading
 
 import pytest
 from werkzeug.security import generate_password_hash
+from werkzeug.serving import make_server
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -37,3 +39,17 @@ def cliente_http():
 def token(cliente_http):
     resposta = cliente_http.post("/api/web/login", json={"usuario": USUARIO_TESTE, "senha": SENHA_TESTE})
     return resposta.get_json()["token"]
+
+
+@pytest.fixture
+def servidor_api(monkeypatch):
+    """Sobe a API num servidor HTTP de verdade (porta livre) e aponta URL_API da CLI para ele."""
+    servidor = make_server("127.0.0.1", 0, api.app, threaded=True)
+    thread = threading.Thread(target=servidor.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("URL_API", f"http://127.0.0.1:{servidor.server_port}/")
+    monkeypatch.delenv("TOKEN_CLI", raising=False)
+    monkeypatch.delenv("SENHA_CLI", raising=False)
+    yield
+    servidor.shutdown()
+    thread.join()
