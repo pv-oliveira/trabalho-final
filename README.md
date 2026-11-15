@@ -452,6 +452,78 @@ Os eventos usam `client: "cli"`. A emissão de token registra `operation: "token
 docker compose logs api | grep '"client": "cli"'
 ```
 
+## #8 — Cadastro e edição de registros pela CLI
+
+A CLI cadastra e edita vendas com os **mesmos 4 campos e as mesmas validações da Web** (#2). Quem valida é a API, então as mensagens de erro são as mesmas nos dois clientes. A venda fica no mesmo banco e aparece na Web na hora. Todos os comandos abaixo são protegidos: exigem o `TOKEN_CLI` obtido com `login` (#7).
+
+### Comandos
+
+| Subcomando | Rota | O que faz |
+|---|---|---|
+| `produtos` | `GET /api/cli/produtos` | Lista o catálogo, com o id usado em `--produto` |
+| `criar --produto ID --quantidade N --valor-unitario VALOR --data AAAA-MM-DD` | `POST /api/cli/records` | Cadastra uma venda |
+| `editar ID --produto ID --quantidade N --valor-unitario VALOR --data AAAA-MM-DD` | `PUT /api/cli/records/{id}` | Edita a venda nº `ID`, substituindo todos os campos |
+
+As 4 opções são obrigatórias nos dois comandos, como no formulário da Web, porque a edição substitui a venda inteira. Opção faltando é erro de uso (código de saída `2`, com a ajuda do comando).
+
+| Opção | Campo | Regra (a mesma da Web) |
+|---|---|---|
+| `--produto` | `produto_id` | Id de um produto existente no catálogo (veja `produtos`) |
+| `--quantidade` | `quantidade` | Inteiro de 1 a 10000 |
+| `--valor-unitario` | `valor_unitario` | Maior que 0, até 100000.00, com no máximo 2 casas decimais e **ponto** decimal (`25.50`) |
+| `--data` | `data_venda` | Data válida em `AAAA-MM-DD`, que não pode ser futura no fuso `FUSO_HORARIO` |
+
+### Exemplos
+
+```bash
+export TOKEN_CLI='<token impresso pelo login>'   # veja a seção #7
+docker compose run --rm cli produtos
+docker compose run --rm cli criar --produto 1 --quantidade 3 --valor-unitario 25.50 --data 2026-10-15
+docker compose run --rm cli editar 1 --produto 10 --quantidade 5 --valor-unitario 2.00 --data 2026-10-16
+```
+
+```text
+  ID  Produto                Categoria  Preço
+   1  Arroz 5 kg             Alimentos  R$ 27,90
+   3  Biscoito recheado      Alimentos  R$ 4,50
+ ...
+Venda nº 1 cadastrada: 3 × Arroz 5 kg, total R$ 76,50, em 15/10/2026.
+Venda nº 1 atualizada: 5 × Sabonete, total R$ 10,00, em 16/10/2026.
+```
+
+Os erros vão para o stderr, sem traceback. Num erro de validação, cada campo inválido aparece numa linha, com o nome da opção da CLI; editar um número que não existe mostra o `404` da API:
+
+```text
+$ docker compose run --rm cli criar --produto 1 --quantidade 0 --valor-unitario 1.234 --data 2030-01-01
+Erro: Dados inválidos. (HTTP 422)
+  --data: A data da venda não pode ser futura.
+  --quantidade: A quantidade deve ser um número inteiro entre 1 e 10000.
+  --valor-unitario: O valor unitário deve ser maior que zero, até 100000.00, com no máximo 2 casas decimais.
+
+$ docker compose run --rm cli editar 999999 --produto 1 --quantidade 5 --valor-unitario 25.50 --data 2026-10-15
+Erro: Venda não encontrada. (HTTP 404)
+```
+
+Códigos de saída: `0` sucesso, `1` erro da API (validação, venda inexistente, número da venda inválido) ou API fora do ar, `2` uso incorreto e `3` sem token ou com token inválido/expirado.
+
+### Endpoints desta issue
+
+Todos exigem `Authorization: Bearer <token da CLI>`. Sem token, com token inválido ou com token da Web, respondem `401`. As respostas são as mesmas das rotas `/api/web/*` da #2.
+
+| Método | Rota | Resposta |
+|---|---|---|
+| GET | `/api/cli/produtos` | `200 {"produtos": [{"id","nome","categoria","preco"}]}` |
+| POST | `/api/cli/records` | `201` venda criada; `400` corpo que não é objeto JSON; `422 {"erro","campos"}` campos inválidos ou produto inexistente |
+| PUT | `/api/cli/records/{id}` | `200` venda atualizada; `400` id ou corpo inválido; `404` se não existir; `422` campos inválidos |
+
+### Logs
+
+Cada operação registra uma linha na camada `api` e outra na camada `db`, com `client: "cli"` e o mesmo `request_id`. Os valores de `operation` são `listar_produtos`, `criar_venda` e `editar_venda`, os mesmos da Web: o `client` diz de onde veio a operação. O banco usa consultas próprias da CLI (`db.listar_produtos_cli`, `db.criar_venda_cli`, `db.editar_venda_cli`). Venda ou produto inexistente geram `WARN` nas duas camadas; dados ou id inválidos são recusados antes do banco e geram `WARN` só na camada `api`. O token nunca é registrado.
+
+```bash
+docker compose logs api | grep '"client": "cli"' | grep -E 'criar_venda|editar_venda'
+```
+
 ## Logs
 
 Cada evento é uma linha JSON no stdout, com `timestamp`, `level`, `layer` (`api`/`db`), `client` (`web`/`cli`), `operation`, `status`, `request_id` e `message`. API e banco compartilham o mesmo `request_id` dentro de uma requisição (também devolvido no header `X-Request-ID`). A inicialização do banco usa `client: "sistema"` e `request_id: "inicializacao"`. Erros não previstos na API viram `500 {"erro": "Erro interno"}` com log `ERROR`. Nas rotas `/api/*`, rota inexistente e método não permitido também respondem em JSON (`404 {"erro": "Rota não encontrada"}`, `405 {"erro": "Método não permitido"}`, este com o header `Allow`), com log `WARN` e o `client` da rota (`cli` em `/api/cli/*`).
