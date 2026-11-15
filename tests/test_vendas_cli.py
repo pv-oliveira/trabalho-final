@@ -330,6 +330,26 @@ def test_criar_e_editar_sem_os_campos_obrigatorios_e_erro_de_uso(capsys, comando
     with pytest.raises(SystemExit) as saida:
         cli.main(comando)
     assert saida.value.code == 2
+    erro = capsys.readouterr().err
+    assert erro.startswith("uso: cli.py ")
+    assert "Erro: faltam as opções obrigatórias: " in erro and f"Veja 'cli.py {comando[0]} -h'." in erro
+
+
+@pytest.mark.parametrize(
+    "argv, mensagem",
+    [
+        (["criar", "--produto", "1", "--quantidade", "3", "--valor-unitario", "25.50", "--data"],
+         "Erro: argumento --data: falta o valor."),
+        (["vender"], "Erro: argumento <comando>: escolha inválida: 'vender' (escolha entre saude, login"),
+        (["produtos", "--extra"], "Erro: argumentos não reconhecidos: --extra."),
+    ],
+)
+def test_erros_de_uso_em_portugues(capsys, argv, mensagem):
+    with pytest.raises(SystemExit) as saida:
+        cli.main(argv)
+    assert saida.value.code == 2
+    erro = capsys.readouterr().err
+    assert mensagem in erro and "usage" not in erro and "error" not in erro
 
 
 def test_produtos_mostra_o_catalogo(com_token, capsys):

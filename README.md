@@ -464,7 +464,7 @@ A CLI cadastra e edita vendas com os **mesmos 4 campos e as mesmas validações 
 | `criar --produto ID --quantidade N --valor-unitario VALOR --data AAAA-MM-DD` | `POST /api/cli/records` | Cadastra uma venda |
 | `editar ID --produto ID --quantidade N --valor-unitario VALOR --data AAAA-MM-DD` | `PUT /api/cli/records/{id}` | Edita a venda nº `ID`, substituindo todos os campos |
 
-As 4 opções são obrigatórias nos dois comandos, como no formulário da Web, porque a edição substitui a venda inteira. Opção faltando é erro de uso (código de saída `2`, com a ajuda do comando).
+As 4 opções são obrigatórias nos dois comandos, como no formulário da Web, porque a edição substitui a venda inteira. Opção faltando é erro de uso: código de saída `2`, com a linha de uso do comando e a mensagem em português (ex.: `Erro: faltam as opções obrigatórias: --quantidade, --valor-unitario, --data. Veja 'cli.py criar -h'.`).
 
 | Opção | Campo | Regra (a mesma da Web) |
 |---|---|---|

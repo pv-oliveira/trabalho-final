@@ -279,8 +279,28 @@ def _traduzir_ajuda(parser):
     return parser
 
 
+class ParserEmPortugues(argparse.ArgumentParser):
+    """ArgumentParser com os erros de uso em português (o argparse os escreve em inglês). Sai com código 2."""
+
+    # Na ordem: "argument " só é trocado depois das frases que contêm "arguments".
+    TRADUCOES = {
+        "the following arguments are required:": "faltam as opções obrigatórias:",
+        "unrecognized arguments:": "argumentos não reconhecidos:",
+        "argument ": "argumento ",
+        "invalid choice:": "escolha inválida:",
+        "choose from": "escolha entre",
+        "expected one argument": "falta o valor",
+    }
+
+    def error(self, message):
+        for original, traducao in self.TRADUCOES.items():
+            message = message.replace(original, traducao)
+        uso = self.format_usage().replace("usage:", "uso:", 1)
+        self.exit(2, f"{uso}Erro: {message}. Veja '{self.prog} -h'.\n")
+
+
 def criar_parser():
-    parser = argparse.ArgumentParser(
+    parser = ParserEmPortugues(
         prog="cli.py",
         description="CLI de vendas. Usa a API em URL_API (padrão: http://api:8000).",
         epilog=f"Comandos protegidos leem o token da variável de ambiente {VARIAVEL_TOKEN} (obtenha com 'login').",
