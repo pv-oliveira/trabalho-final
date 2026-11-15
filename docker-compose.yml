@@ -17,6 +17,9 @@ services:
     build:
       context: .
       target: producao
+    # Mesma imagem do serviço `cli`: o `docker compose up --build` atualiza as duas.
+    image: ${COMPOSE_PROJECT_NAME}-app
+    pull_policy: never  # imagem local: se faltar, é construída (build), nunca baixada de um registro
     environment:
       URL_BANCO: postgresql://app:${SENHA_BANCO:-app}@db:5432/app
       ADMIN_USUARIO: ${ADMIN_USUARIO:-admin}
@@ -46,9 +49,9 @@ services:
         condition: service_healthy
 
   cli:
-    build:
-      context: .
-      target: producao
+    # Usa a imagem construída pelo serviço `api` (sem build próprio), para nunca rodar um cli.py antigo.
+    image: ${COMPOSE_PROJECT_NAME}-app
+    pull_policy: never  # a imagem é local, nunca vem de um registro
     profiles: ["cli"]
     entrypoint: ["python", "cli.py"]
     command: ["--help"]

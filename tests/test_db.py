@@ -4,15 +4,11 @@ import psycopg
 import pytest
 
 import db
-from conftest import USUARIO_TESTE
+from conftest import USUARIO_TESTE, eventos_do_log
 
 
 def _conexao_quebrada():
     raise psycopg.OperationalError("banco fora do ar")
-
-
-def _ultimo_evento(capsys):
-    return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
 
 
 def test_registrar_log_emite_linha_json(capsys):
@@ -31,7 +27,7 @@ def test_registrar_log_aceita_camada_api(capsys):
 
 def test_inicializar_banco_registra_origem_sistema(capsys):
     db.inicializar_banco(USUARIO_TESTE, "Nome", "hash")
-    evento = _ultimo_evento(capsys)
+    evento = eventos_do_log(capsys)[-1]
     assert evento["client"] == "sistema" and evento["request_id"] == "inicializacao"
 
 
@@ -45,9 +41,27 @@ def test_inicializar_banco_e_idempotente_e_atualiza_nome_e_hash():
 def test_buscar_usuario_encontrado_e_registrado(capsys):
     registro = db.buscar_usuario(USUARIO_TESTE, "req-3", "web")
     assert registro["usuario"] == USUARIO_TESTE
-    evento = _ultimo_evento(capsys)
+    evento = eventos_do_log(capsys)[-1]
     assert evento["operation"] == "consultar_usuario" and evento["status"] == "success"
     assert evento["request_id"] == "req-3"
+
+
+def test_buscar_usuario_cli_registra_client_cli(capsys):
+    registro = db.buscar_usuario_cli(USUARIO_TESTE, "req-cli")
+    assert registro["usuario"] == USUARIO_TESTE and registro["senha_hash"]
+    evento = eventos_do_log(capsys)[-1]
+    assert evento["layer"] == "db" and evento["client"] == "cli" and evento["request_id"] == "req-cli"
+    assert evento["operation"] == "consultar_usuario_cli" and evento["message"] == "Usuário encontrado"
+    assert db.buscar_usuario_cli("ninguem", "req-cli") is None
+    assert eventos_do_log(capsys)[-1]["message"] == "Usuário não encontrado"
+
+
+def test_buscar_usuario_cli_erro_no_banco(monkeypatch, capsys):
+    monkeypatch.setattr(db, "obter_conexao", _conexao_quebrada)
+    with pytest.raises(psycopg.OperationalError):
+        db.buscar_usuario_cli(USUARIO_TESTE, "req-cli")
+    evento = eventos_do_log(capsys)[-1]
+    assert evento["level"] == "ERROR" and evento["client"] == "cli" and evento["operation"] == "consultar_usuario_cli"
 
 
 def test_buscar_usuario_inexistente():
@@ -58,7 +72,7 @@ def test_buscar_usuario_erro_no_banco(monkeypatch, capsys):
     monkeypatch.setattr(db, "obter_conexao", _conexao_quebrada)
     with pytest.raises(psycopg.OperationalError):
         db.buscar_usuario(USUARIO_TESTE, "req-5", "web")
-    evento = _ultimo_evento(capsys)
+    evento = eventos_do_log(capsys)[-1]
     assert evento["level"] == "ERROR" and evento["status"] == "error"
 
 
@@ -66,7 +80,7 @@ def test_inicializar_banco_erro(monkeypatch, capsys):
     monkeypatch.setattr(db, "obter_conexao", _conexao_quebrada)
     with pytest.raises(psycopg.OperationalError):
         db.inicializar_banco("x", "y", "z")
-    evento = _ultimo_evento(capsys)
+    evento = eventos_do_log(capsys)[-1]
     assert evento["operation"] == "inicializar_banco" and evento["status"] == "error"
 
 

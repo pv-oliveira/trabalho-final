@@ -8,12 +8,9 @@ import pytest
 
 import api
 import db
+from conftest import eventos_do_log
 
 HOJE = date(2026, 10, 31)
-
-
-def _eventos(capsys):
-    return [json.loads(linha) for linha in capsys.readouterr().out.strip().splitlines()]
 
 
 def _falhar_no_banco(*_args):
@@ -82,7 +79,7 @@ def test_dashboard_exige_autenticacao(cliente_http, cabecalho_auth, capsys):
     resposta = cliente_http.get("/api/web/dashboard", headers=cabecalhos)
     assert resposta.status_code == 401
     # Recusada antes do banco: nenhum evento da camada db.
-    assert all(e["layer"] == "api" for e in _eventos(capsys))
+    assert all(e["layer"] == "api" for e in eventos_do_log(capsys))
 
 
 # --- indicadores ----------------------------------------------------------------------------------
@@ -176,7 +173,7 @@ def test_dashboard_correlaciona_logs_api_e_banco(cliente_http, cabecalho, vendas
     capsys.readouterr()
     resposta = cliente_http.get("/api/web/dashboard", headers=cabecalho)
     request_id = resposta.headers["X-Request-ID"]
-    eventos = [e for e in _eventos(capsys) if e["request_id"] == request_id]
+    eventos = [e for e in eventos_do_log(capsys) if e["request_id"] == request_id]
     assert {(e["layer"], e["operation"], e["status"], e["client"]) for e in eventos} == {
         ("api", "dashboard", "success", "web"),
         ("db", "dashboard", "success", "web"),
@@ -189,7 +186,7 @@ def test_dashboard_erro_no_banco(cliente_http, cabecalho, monkeypatch, capsys):
     capsys.readouterr()
     resposta = cliente_http.get("/api/web/dashboard", headers=cabecalho)
     assert resposta.status_code == 500 and resposta.get_json() == {"erro": "Erro interno"}
-    evento = _eventos(capsys)[-1]
+    evento = eventos_do_log(capsys)[-1]
     assert (evento["level"], evento["operation"]) == ("ERROR", "dashboard")
 
 
@@ -200,7 +197,7 @@ def test_db_indicadores_erro_registra_log(monkeypatch, capsys):
     monkeypatch.setattr(db, "obter_conexao", conexao_quebrada)
     with pytest.raises(psycopg.OperationalError):
         db.indicadores_dashboard_web(HOJE, "req-erro")
-    evento = _eventos(capsys)[-1]
+    evento = eventos_do_log(capsys)[-1]
     assert (evento["layer"], evento["level"], evento["operation"], evento["request_id"]) == (
         "db",
         "ERROR",

@@ -1,16 +1,11 @@
 """Testes da listagem paginada, ordenação e exclusão de vendas pela Web (issue #3)."""
 
-import json
-
 import psycopg
 import pytest
 
 import api
 import db
-
-
-def _eventos(capsys):
-    return [json.loads(linha) for linha in capsys.readouterr().out.strip().splitlines()]
+from conftest import eventos_do_log
 
 
 def _conexao_quebrada():
@@ -183,7 +178,7 @@ def test_parametros_invalidos(cliente_http, cabecalho, consulta, campo, capsys):
     assert resposta.status_code == 400
     corpo = resposta.get_json()
     assert corpo["erro"] == "Parâmetros inválidos." and set(corpo["campos"]) == {campo}
-    eventos = [e for e in _eventos(capsys) if e["request_id"] == resposta.headers["X-Request-ID"]]
+    eventos = [e for e in eventos_do_log(capsys) if e["request_id"] == resposta.headers["X-Request-ID"]]
     assert [e["layer"] for e in eventos if e["operation"] == "listar_vendas"] == ["api"]
     assert eventos[-1]["level"] == "WARN"
 
@@ -192,7 +187,7 @@ def test_listagem_correlaciona_logs_api_e_banco(cliente_http, cabecalho, sete_ve
     capsys.readouterr()
     resposta = cliente_http.get("/api/web/records", headers=cabecalho)
     request_id = resposta.headers["X-Request-ID"]
-    eventos = [e for e in _eventos(capsys) if e["request_id"] == request_id]
+    eventos = [e for e in eventos_do_log(capsys) if e["request_id"] == request_id]
     assert {(e["layer"], e["operation"], e["status"], e["client"]) for e in eventos} == {
         ("api", "listar_vendas", "success", "web"),
         ("db", "listar_vendas", "success", "web"),
@@ -204,7 +199,7 @@ def test_listagem_erro_no_banco(cliente_http, cabecalho, monkeypatch, capsys):
     capsys.readouterr()
     resposta = cliente_http.get("/api/web/records", headers=cabecalho)
     assert resposta.status_code == 500 and resposta.get_json() == {"erro": "Erro interno"}
-    evento = _eventos(capsys)[-1]
+    evento = eventos_do_log(capsys)[-1]
     assert evento["level"] == "ERROR" and evento["operation"] == "listar_vendas"
 
 
@@ -219,7 +214,7 @@ def test_excluir_remove_do_banco_e_da_listagem(cliente_http, cabecalho, sete_ven
     assert resposta.get_json() == {"id": alvo, "mensagem": "Venda excluída."}
 
     request_id = resposta.headers["X-Request-ID"]
-    eventos = [e for e in _eventos(capsys) if e["request_id"] == request_id]
+    eventos = [e for e in eventos_do_log(capsys) if e["request_id"] == request_id]
     assert {(e["layer"], e["operation"], e["status"]) for e in eventos} == {
         ("api", "excluir_venda", "success"),
         ("db", "excluir_venda", "success"),
@@ -234,7 +229,7 @@ def test_excluir_inexistente_retorna_404_com_logs(cliente_http, cabecalho, capsy
     capsys.readouterr()
     resposta = cliente_http.delete("/api/web/records/999", headers=cabecalho)
     assert resposta.status_code == 404 and resposta.get_json() == {"erro": "Venda não encontrada."}
-    eventos = [e for e in _eventos(capsys) if e["request_id"] == resposta.headers["X-Request-ID"]]
+    eventos = [e for e in eventos_do_log(capsys) if e["request_id"] == resposta.headers["X-Request-ID"]]
     assert {(e["layer"], e["level"]) for e in eventos if e["operation"] == "excluir_venda"} == {
         ("api", "WARN"),
         ("db", "WARN"),
@@ -253,7 +248,7 @@ def test_excluir_id_invalido_retorna_400_sem_consultar_o_banco(cliente_http, cab
     capsys.readouterr()
     resposta = cliente_http.delete(f"/api/web/records/{id_venda}", headers=cabecalho)
     assert resposta.status_code == 400 and resposta.get_json() == {"erro": "Número da venda inválido."}
-    evento = _eventos(capsys)[-1]
+    evento = eventos_do_log(capsys)[-1]
     assert (evento["layer"], evento["level"], evento["operation"]) == ("api", "WARN", "excluir_venda")
 
 
@@ -279,7 +274,7 @@ def test_excluir_duas_vezes(cliente_http, cabecalho, sete_vendas):
 def test_db_listar_vendas_web_retorna_pagina_e_total(sete_vendas, capsys):
     linhas, total = db.listar_vendas_web(2, 3, "id", "asc", "req-lista")
     assert total == 7 and [linha["id"] for linha in linhas] == sorted(sete_vendas)[3:6]
-    evento = _eventos(capsys)[-1]
+    evento = eventos_do_log(capsys)[-1]
     assert evento["layer"] == "db" and evento["operation"] == "listar_vendas" and evento["request_id"] == "req-lista"
 
 
@@ -287,7 +282,7 @@ def test_db_listar_vendas_web_erro(monkeypatch, capsys):
     monkeypatch.setattr(db, "obter_conexao", _conexao_quebrada)
     with pytest.raises(psycopg.OperationalError):
         db.listar_vendas_web(1, 5, "id", "asc", "req-erro")
-    evento = _eventos(capsys)[-1]
+    evento = eventos_do_log(capsys)[-1]
     assert evento["level"] == "ERROR" and evento["operation"] == "listar_vendas"
 
 
@@ -300,5 +295,5 @@ def test_db_excluir_venda_web_erro(monkeypatch, capsys):
     monkeypatch.setattr(db, "obter_conexao", _conexao_quebrada)
     with pytest.raises(psycopg.OperationalError):
         db.excluir_venda_web(1, "req-erro")
-    evento = _eventos(capsys)[-1]
+    evento = eventos_do_log(capsys)[-1]
     assert evento["level"] == "ERROR" and evento["operation"] == "excluir_venda"

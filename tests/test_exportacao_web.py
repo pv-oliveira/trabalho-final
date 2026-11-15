@@ -12,12 +12,9 @@ import pytest
 
 import api
 import db
+from conftest import eventos_do_log
 
 CABECALHO = ["Nº", "Data", "Produto", "Categoria", "Quantidade", "Valor unitário", "Valor total"]
-
-
-def _eventos(capsys):
-    return [json.loads(linha) for linha in capsys.readouterr().out.strip().splitlines()]
 
 
 def _conexao_quebrada():
@@ -95,7 +92,7 @@ def test_exportacao_exige_autenticacao(cliente_http, cabecalho_auth, capsys):
     capsys.readouterr()
     resposta = cliente_http.get("/api/web/records/export", headers=cabecalhos)
     assert resposta.status_code == 401 and resposta.get_json() == {"erro": "Não autenticado"}
-    evento = _eventos(capsys)[-1]
+    evento = eventos_do_log(capsys)[-1]
     assert (evento["layer"], evento["operation"], evento["level"]) == ("api", "exportar_vendas", "WARN")
 
 
@@ -218,7 +215,7 @@ def test_parametros_invalidos_retornam_400_sem_consultar_o_banco(
     assert resposta.status_code == 400
     corpo = resposta.get_json()
     assert corpo["erro"] == "Parâmetros inválidos." and set(corpo["campos"]) == campos
-    eventos = [e for e in _eventos(capsys) if e["request_id"] == resposta.headers["X-Request-ID"]]
+    eventos = [e for e in eventos_do_log(capsys) if e["request_id"] == resposta.headers["X-Request-ID"]]
     assert [(e["layer"], e["level"]) for e in eventos if e["operation"] == "exportar_vendas"] == [("api", "WARN")]
 
 
@@ -252,7 +249,7 @@ def test_exportacao_erro_no_banco(cliente_http, cabecalho, monkeypatch, capsys):
     capsys.readouterr()
     resposta = _exportar(cliente_http, cabecalho)
     assert resposta.status_code == 500 and resposta.get_json() == {"erro": "Erro interno"}
-    evento = _eventos(capsys)[-1]
+    evento = eventos_do_log(capsys)[-1]
     assert (evento["layer"], evento["level"], evento["operation"]) == ("api", "ERROR", "exportar_vendas")
 
 
@@ -266,7 +263,7 @@ def test_db_exportar_vendas_web_combina_filtros_sem_paginar(vendas, capsys):
     assert set(linhas[0]) == {
         "id", "data_venda", "produto_nome", "categoria", "quantidade", "valor_unitario", "valor_total"
     }
-    evento = _eventos(capsys)[-1]
+    evento = eventos_do_log(capsys)[-1]
     assert (evento["layer"], evento["operation"], evento["request_id"]) == ("db", "exportar_vendas", "req-exporta")
     assert "3 vendas" in evento["message"] and "categoria, data_fim" in evento["message"]
 
@@ -274,12 +271,12 @@ def test_db_exportar_vendas_web_combina_filtros_sem_paginar(vendas, capsys):
 def test_db_exportar_vendas_web_sem_filtros(vendas, capsys):
     linhas = db.exportar_vendas_web({}, "id", "desc", "req-exporta")
     assert [linha["id"] for linha in linhas] == sorted(vendas.values(), reverse=True)
-    assert "sem filtros" in _eventos(capsys)[-1]["message"]
+    assert "sem filtros" in eventos_do_log(capsys)[-1]["message"]
 
 
 def test_db_exportar_vendas_web_erro(monkeypatch, capsys):
     monkeypatch.setattr(db, "obter_conexao", _conexao_quebrada)
     with pytest.raises(psycopg.OperationalError):
         db.exportar_vendas_web({"categoria": "Bebidas"}, "id", "asc", "req-erro")
-    evento = _eventos(capsys)[-1]
+    evento = eventos_do_log(capsys)[-1]
     assert (evento["level"], evento["operation"], evento["status"]) == ("ERROR", "exportar_vendas", "error")

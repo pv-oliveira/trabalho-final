@@ -68,12 +68,16 @@ def expor_request_id(resposta):
     return resposta
 
 
-def _exigir_token(origem, serializador, validade, operacao):
-    """Exige `Authorization: Bearer <token>` válido. O token nunca vai para o log."""
+def _exigir_token(serializador, validade, operacao):
+    """Exige `Authorization: Bearer <token>` válido. O token nunca vai para o log.
+
+    O `client` do log vem do caminho da rota (`origem_da_requisicao`), e não de um parâmetro.
+    """
 
     def decorador(rota):
         @wraps(rota)
         def envoltorio(*args, **kwargs):
+            origem = origem_da_requisicao()
             cabecalho = request.headers.get("Authorization", "")
             if not cabecalho.startswith("Bearer "):
                 registrar_log("WARN", origem, operacao, "error", "Requisição sem token")
@@ -94,12 +98,12 @@ def _exigir_token(origem, serializador, validade, operacao):
 
 def exigir_autenticacao_web(operacao):
     """Exige `Authorization: Bearer <token>` válido emitido por /api/web/login."""
-    return _exigir_token("web", serializador_web, VALIDADE_TOKEN_WEB, operacao)
+    return _exigir_token(serializador_web, VALIDADE_TOKEN_WEB, operacao)
 
 
 def exigir_autenticacao_cli(operacao):
     """Exige `Authorization: Bearer <token>` válido emitido por /api/cli/token."""
-    return _exigir_token("cli", serializador_cli, VALIDADE_TOKEN_CLI, operacao)
+    return _exigir_token(serializador_cli, VALIDADE_TOKEN_CLI, operacao)
 
 
 def origem_da_requisicao():
@@ -107,10 +111,33 @@ def origem_da_requisicao():
     return "cli" if request.path.startswith("/api/cli/") else "web"
 
 
+# Mensagens dos erros HTTP do próprio Flask (rota inexistente, método errado...) nas rotas /api/*.
+MENSAGENS_ERRO_HTTP = {
+    400: "Requisição inválida",
+    404: "Rota não encontrada",
+    405: "Método não permitido",
+}
+
+
+def responder_erro_http(erro):
+    """Erro HTTP do Flask em /api/*: JSON `{"erro": ...}` e log, como as demais respostas da API."""
+    nivel = "ERROR" if erro.code >= 500 else "WARN"
+    mensagem = MENSAGENS_ERRO_HTTP.get(erro.code, "Erro interno" if erro.code >= 500 else "Requisição inválida")
+    operacao = request.endpoint or "erro_http"  # 404 e 405 não chegam a nenhuma rota
+    registrar_log(nivel, origem_da_requisicao(), operacao, "error", f"{mensagem}: {request.method} {request.path}")
+    resposta = jsonify(erro=mensagem)
+    resposta.status_code = erro.code
+    if getattr(erro, "valid_methods", None):
+        resposta.headers["Allow"] = ", ".join(erro.valid_methods)
+    return resposta
+
+
 @app.errorhandler(Exception)
 def tratar_erro_inesperado(erro):
     """Responde erros não previstos com JSON e log, em vez da página HTML padrão."""
     if isinstance(erro, HTTPException):
+        if request.path.startswith("/api/"):
+            return responder_erro_http(erro)
         return erro
     registrar_log("ERROR", origem_da_requisicao(), request.endpoint or "desconhecida", "error", "Erro inesperado na API")
     return jsonify(erro="Erro interno"), 500
@@ -122,13 +149,15 @@ def web_saude():
     return jsonify(status="ok"), 200
 
 
-def emitir_token(origem, operacao, serializador, validade, mensagem_sucesso):
+def emitir_token(operacao, serializador, validade, mensagem_sucesso):
     """Confere usuário e senha do corpo JSON e responde com um token assinado por `serializador`.
 
+    A CLI consulta o usuário com `db.buscar_usuario_cli`; a Web, com `db.buscar_usuario`.
     A resposta informa a validade do token em segundos (`validade_segundos`).
 
     Compartilhado pelo login da Web e pela emissão de token da CLI. Senha e token não vão para o log.
     """
+    origem = origem_da_requisicao()
     dados = request.get_json(silent=True)
     if not isinstance(dados, dict):
         dados = {}
@@ -139,7 +168,10 @@ def emitir_token(origem, operacao, serializador, validade, mensagem_sucesso):
         return jsonify(erro="Usuário e senha são obrigatórios"), 400
 
     try:
-        registro = db.buscar_usuario(usuario, g.request_id, origem)
+        if origem == "cli":
+            registro = db.buscar_usuario_cli(usuario, g.request_id)
+        else:
+            registro = db.buscar_usuario(usuario, g.request_id, origem)
     except psycopg.Error:
         registrar_log("ERROR", origem, operacao, "error", "Falha ao acessar o banco")
         return jsonify(erro="Erro interno"), 500
@@ -156,7 +188,7 @@ def emitir_token(origem, operacao, serializador, validade, mensagem_sucesso):
 
 @app.post("/api/web/login")
 def web_login():
-    return emitir_token("web", "login", serializador_web, VALIDADE_TOKEN_WEB, "Login realizado")
+    return emitir_token("login", serializador_web, VALIDADE_TOKEN_WEB, "Login realizado")
 
 
 @app.get("/api/web/sessao")
@@ -174,7 +206,7 @@ def cli_saude():
 
 @app.post("/api/cli/token")
 def cli_token():
-    return emitir_token("cli", "token", serializador_cli, VALIDADE_TOKEN_CLI, "Token da CLI emitido")
+    return emitir_token("token", serializador_cli, VALIDADE_TOKEN_CLI, "Token da CLI emitido")
 
 
 @app.get("/api/cli/sessao")

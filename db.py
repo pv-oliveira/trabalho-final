@@ -103,8 +103,8 @@ def inicializar_banco(usuario, nome, senha_hash, request_id="inicializacao", ori
     )
 
 
-def buscar_usuario(usuario, request_id, origem):
-    """Retorna o usuário (dict) ou None se não existir."""
+def _consultar_usuario(usuario, request_id, origem, operacao):
+    """Busca o usuário pelo login. Retorna o registro (dict) ou None se não existir."""
     try:
         with obter_conexao() as conexao:
             linha = conexao.execute(
@@ -112,11 +112,21 @@ def buscar_usuario(usuario, request_id, origem):
                 (usuario,),
             ).fetchone()
     except psycopg.Error:
-        registrar_log("ERROR", origem, "consultar_usuario", "error", request_id, "Falha ao consultar usuário")
+        registrar_log("ERROR", origem, operacao, "error", request_id, "Falha ao consultar usuário")
         raise
     mensagem = "Usuário encontrado" if linha else "Usuário não encontrado"
-    registrar_log("INFO", origem, "consultar_usuario", "success", request_id, mensagem)
+    registrar_log("INFO", origem, operacao, "success", request_id, mensagem)
     return linha
+
+
+def buscar_usuario(usuario, request_id, origem):
+    """Retorna o usuário (dict) ou None se não existir. Usado pelo login da Web."""
+    return _consultar_usuario(usuario, request_id, origem, "consultar_usuario")
+
+
+def buscar_usuario_cli(usuario, request_id):
+    """Consulta da CLI: usuário que pede token em /api/cli/token, com log `client: cli`."""
+    return _consultar_usuario(usuario, request_id, "cli", "consultar_usuario_cli")
 
 
 class ProdutoInexistente(Exception):

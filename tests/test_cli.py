@@ -1,5 +1,7 @@
 """Testes da #7: rotas /api/cli/* (health, token, sessao) e a CLI (cli.py)."""
 
+import http.client
+import http.server
 import io
 import json
 import runpy
@@ -15,11 +17,7 @@ from werkzeug.serving import make_server
 import api
 import cli
 import db
-from conftest import NOME_TESTE, SENHA_TESTE, USUARIO_TESTE
-
-
-def _eventos(capsys):
-    return [json.loads(linha) for linha in capsys.readouterr().out.strip().splitlines() if linha.startswith("{")]
+from conftest import NOME_TESTE, SENHA_TESTE, USUARIO_TESTE, eventos_do_log
 
 
 def _token_cli(cliente_http):
@@ -35,7 +33,7 @@ def test_cli_saude_e_publica_e_registra_client_cli(cliente_http, capsys):
     resposta = cliente_http.get("/api/cli/health")
     assert resposta.status_code == 200
     assert resposta.get_json() == {"status": "ok"}
-    evento = _eventos(capsys)[-1]
+    evento = eventos_do_log(capsys)[-1]
     assert evento["layer"] == "api" and evento["client"] == "cli" and evento["operation"] == "health"
     assert evento["request_id"] == resposta.headers["X-Request-ID"]
 
@@ -48,11 +46,12 @@ def test_cli_token_emitido_correlaciona_logs_sem_expor_segredos(cliente_http, ca
     assert corpo["usuario"] == USUARIO_TESTE and corpo["nome"] == NOME_TESTE and corpo["token"]
     assert corpo["validade_segundos"] == api.VALIDADE_TOKEN_CLI
 
-    eventos = _eventos(capsys)
+    eventos = eventos_do_log(capsys)
     request_id = resposta.headers["X-Request-ID"]
     da_requisicao = [e for e in eventos if e["request_id"] == request_id]
     assert {e["layer"] for e in da_requisicao} == {"api", "db"}
     assert {e["client"] for e in da_requisicao} == {"cli"}
+    assert [e["operation"] for e in da_requisicao if e["layer"] == "db"] == ["consultar_usuario_cli"]
     final = da_requisicao[-1]
     assert final["operation"] == "token" and final["status"] == "success" and final["level"] == "INFO"
     bruto = json.dumps(eventos)
@@ -68,7 +67,7 @@ def test_cli_token_credenciais_invalidas_retorna_401_e_registra_falha(cliente_ht
     resposta = cliente_http.post("/api/cli/token", json={"usuario": usuario, "senha": senha})
     assert resposta.status_code == 401
     assert resposta.get_json() == {"erro": "Usuário ou senha inválidos"}
-    evento = _eventos(capsys)[-1]
+    evento = eventos_do_log(capsys)[-1]
     assert evento["client"] == "cli" and evento["operation"] == "token"
     assert evento["level"] == "WARN" and evento["status"] == "error"
     assert senha not in json.dumps(evento)
@@ -97,11 +96,11 @@ def test_cli_token_erro_no_banco(cliente_http, monkeypatch, capsys):
     def falhar(*_args):
         raise psycopg.OperationalError("fora do ar")
 
-    monkeypatch.setattr(db, "buscar_usuario", falhar)
+    monkeypatch.setattr(db, "buscar_usuario_cli", falhar)
     capsys.readouterr()
     resposta = cliente_http.post("/api/cli/token", json={"usuario": USUARIO_TESTE, "senha": SENHA_TESTE})
     assert resposta.status_code == 500
-    evento = _eventos(capsys)[-1]
+    evento = eventos_do_log(capsys)[-1]
     assert evento["level"] == "ERROR" and evento["client"] == "cli" and evento["operation"] == "token"
 
 
@@ -111,7 +110,7 @@ def test_cli_sessao_com_token_valido(cliente_http, capsys):
     resposta = cliente_http.get("/api/cli/sessao", headers={"Authorization": f"Bearer {token}"})
     assert resposta.status_code == 200
     assert resposta.get_json() == {"usuario": USUARIO_TESTE, "nome": NOME_TESTE}
-    evento = _eventos(capsys)[-1]
+    evento = eventos_do_log(capsys)[-1]
     assert evento["client"] == "cli" and evento["operation"] == "sessao" and evento["status"] == "success"
     assert token not in json.dumps(evento)
 
@@ -129,7 +128,7 @@ def test_cli_sessao_sem_token_ou_invalido_retorna_401(cliente_http, capsys, cabe
     resposta = cliente_http.get("/api/cli/sessao", headers=cabecalhos)
     assert resposta.status_code == 401
     assert resposta.get_json() == {"erro": "Não autenticado"}
-    evento = _eventos(capsys)[-1]
+    evento = eventos_do_log(capsys)[-1]
     assert evento["client"] == "cli" and evento["operation"] == "sessao"
     assert evento["level"] == "WARN" and evento["message"] == mensagem
     assert "invalido" not in json.dumps(evento)
@@ -159,12 +158,12 @@ def test_erro_inesperado_em_rota_cli_registra_client_cli(cliente_http, monkeypat
     def falhar(*_args):
         raise KeyError("URL_BANCO")
 
-    monkeypatch.setattr(db, "buscar_usuario", falhar)
+    monkeypatch.setattr(db, "buscar_usuario_cli", falhar)
     capsys.readouterr()
     resposta = cliente_http.post("/api/cli/token", json={"usuario": USUARIO_TESTE, "senha": SENHA_TESTE})
     assert resposta.status_code == 500
     assert resposta.get_json() == {"erro": "Erro interno"}
-    evento = _eventos(capsys)[-1]
+    evento = eventos_do_log(capsys)[-1]
     assert evento["level"] == "ERROR" and evento["client"] == "cli" and evento["operation"] == "cli_token"
 
 
@@ -276,19 +275,94 @@ def test_erro_da_api_diferente_de_401_sai_com_codigo_1(servidor_api, capsys, mon
     def falhar(*_args):
         raise psycopg.OperationalError("fora do ar")
 
-    monkeypatch.setattr(db, "buscar_usuario", falhar)
+    monkeypatch.setattr(db, "buscar_usuario_cli", falhar)
     monkeypatch.setenv("SENHA_CLI", SENHA_TESTE)
     assert cli.main(["login", "--usuario", USUARIO_TESTE]) == cli.SAIDA_ERRO
     assert "Erro interno (HTTP 500)" in capsys.readouterr().err
 
 
-def test_erro_da_api_sem_json_mostra_o_status(monkeypatch, capsys):
-    def responder_502(*_args, **_kwargs):
+def test_erro_da_api_sem_json_mostra_o_status_uma_vez(monkeypatch, capsys):
+    def responder_502(_requisicao):
         raise urllib.error.HTTPError("http://api", 502, "Bad Gateway", {}, io.BytesIO(b"<html>"))
 
-    monkeypatch.setattr(cli.urllib.request, "urlopen", responder_502)
+    monkeypatch.setattr(cli, "abrir_url", responder_502)
     assert cli.main(["saude"]) == cli.SAIDA_ERRO
-    assert "Erro: HTTP 502 (HTTP 502)" in capsys.readouterr().err
+    erro = capsys.readouterr().err
+    assert "Erro: resposta inesperada da API (HTTP 502)" in erro
+    assert erro.count("HTTP 502") == 1
+
+
+def test_erro_da_api_com_corpo_cortado(monkeypatch, capsys):
+    class CorpoCortado(io.BytesIO):
+        def read(self, *_args):
+            raise http.client.IncompleteRead(b"{")
+
+    def responder_500(_requisicao):
+        raise urllib.error.HTTPError("http://api", 500, "Erro", {}, CorpoCortado())
+
+    monkeypatch.setattr(cli, "abrir_url", responder_500)
+    assert cli.main(["saude"]) == cli.SAIDA_ERRO
+    assert "Erro: resposta inesperada da API (HTTP 500)" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "excecao",
+    [http.client.BadStatusLine("SSH-2.0"), http.client.IncompleteRead(b"{"), http.client.LineTooLong("header line")],
+)
+def test_resposta_que_nao_e_http_nao_gera_traceback(monkeypatch, capsys, excecao):
+    def falhar(_requisicao):
+        raise excecao
+
+    monkeypatch.setattr(cli, "abrir_url", falhar)
+    assert cli.main(["saude"]) == cli.SAIDA_ERRO
+    assert "Erro: não foi possível conectar à API em" in capsys.readouterr().err
+
+
+def test_servico_que_nao_e_http_nao_gera_traceback(monkeypatch, capsys):
+    """URL_API apontando para um serviço que não fala HTTP (ex.: o PostgreSQL em db:5432)."""
+
+    class NaoHttp(http.server.BaseHTTPRequestHandler):
+        def handle(self):
+            self.rfile.readline()
+            self.wfile.write(b"isto nao e HTTP\r\n")
+
+    servidor = http.server.ThreadingHTTPServer(("127.0.0.1", 0), NaoHttp)
+    threading.Thread(target=servidor.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setenv("URL_API", f"http://127.0.0.1:{servidor.server_port}")
+        assert cli.main(["saude"]) == cli.SAIDA_ERRO
+    finally:
+        servidor.shutdown()
+        servidor.server_close()
+    assert "Erro: não foi possível conectar à API em" in capsys.readouterr().err
+
+
+def test_redirecionamento_nao_reenvia_o_token(monkeypatch, capsys):
+    """Um 3xx não é seguido: o Authorization não vai para o endereço do redirecionamento."""
+    recebidas = []
+
+    class Redirecionador(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            recebidas.append((self.path, self.headers.get("Authorization")))
+            self.send_response(302)
+            self.send_header("Location", "/outro-host")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    servidor = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Redirecionador)
+    threading.Thread(target=servidor.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setenv("URL_API", f"http://127.0.0.1:{servidor.server_port}")
+        monkeypatch.setenv("TOKEN_CLI", "token-secreto")
+        assert cli.main(["sessao"]) == cli.SAIDA_ERRO
+    finally:
+        servidor.shutdown()
+        servidor.server_close()
+    assert recebidas == [("/api/cli/sessao", "Bearer token-secreto")]
+    assert "Erro: resposta inesperada da API (HTTP 302)" in capsys.readouterr().err
 
 
 def test_url_api_invalida_nao_expoe_o_token(monkeypatch, capsys):
@@ -301,31 +375,62 @@ def test_url_api_invalida_nao_expoe_o_token(monkeypatch, capsys):
 
 
 def test_cabecalho_recusado_nao_expoe_o_token(monkeypatch, capsys):
-    def recusar(requisicao, **_kwargs):
+    def recusar(requisicao):
         raise ValueError(f"Invalid header value {requisicao.get_header('Authorization')!r}")
 
-    monkeypatch.setattr(cli.urllib.request, "urlopen", recusar)
+    monkeypatch.setattr(cli, "abrir_url", recusar)
     with pytest.raises(cli.ApiIndisponivel) as erro:
         cli.requisitar("GET", "/sessao", token="token-secreto")
     assert "token-secreto" not in str(erro.value)
 
 
+class _RespostaFixa(io.BytesIO):
+    """Resposta HTTP 200 com o corpo dado, usável no `with` como a de `urlopen`."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        self.close()
+
+
 def test_resposta_de_sucesso_sem_json(monkeypatch, capsys):
-    class RespostaHtml(io.BytesIO):
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            self.close()
-
-    monkeypatch.setattr(cli.urllib.request, "urlopen", lambda *_a, **_k: RespostaHtml(b"<html>"))
+    monkeypatch.setattr(cli, "abrir_url", lambda _requisicao: _RespostaFixa(b"<html>"))
     assert cli.main(["saude"]) == cli.SAIDA_ERRO
     assert "(a resposta não é JSON)" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("comando", [["saude"], ["login", "--usuario", USUARIO_TESTE]])
+@pytest.mark.parametrize("corpo", [b"[]", b'"ok"', b"null", b"1"])
+def test_resposta_json_que_nao_e_objeto(monkeypatch, capsys, comando, corpo):
+    monkeypatch.setenv("SENHA_CLI", SENHA_TESTE)
+    monkeypatch.setattr(cli, "abrir_url", lambda _requisicao: _RespostaFixa(corpo))
+    assert cli.main(comando) == cli.SAIDA_ERRO
+    assert "(a resposta não é um objeto JSON)" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("token", ["\u2018token\u2019", "tokén", "token\x07"])
+def test_token_com_caracteres_invalidos_nao_chama_a_api(monkeypatch, capsys, token):
+    monkeypatch.setattr(cli, "requisitar", lambda *_a, **_k: pytest.fail("não devia chamar a API"))
+    monkeypatch.setenv("TOKEN_CLI", token)
+    assert cli.main(["sessao"]) == cli.SAIDA_NAO_AUTENTICADO
+    erro = capsys.readouterr().err
+    assert "TOKEN_CLI tem caracteres inválidos" in erro
+    assert "conectar" not in erro
+
+
 @pytest.mark.parametrize(
     ("segundos", "texto"),
-    [(8 * 3600, "8 horas"), (3600, "1 hora"), (90 * 60, "90 minutos")],
+    [
+        (8 * 3600, "8 horas"),
+        (3600, "1 hora"),
+        (90 * 60, "90 minutos"),
+        (60, "1 minuto"),
+        (90, "90 segundos"),
+        (30, "30 segundos"),
+        (1, "1 segundo"),
+        (0, "0 segundos"),
+    ],
 )
 def test_descrever_validade(segundos, texto):
     assert cli.descrever_validade(segundos) == texto

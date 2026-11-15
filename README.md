@@ -395,7 +395,7 @@ docker compose run --rm cli --help       # ajuda geral, com a lista de subcomand
 docker compose run --rm cli login --help # ajuda de um subcomando
 ```
 
-O `docker compose up --build` não reconstrói o serviço `cli` (ele está num perfil). Depois de atualizar o código, use `docker compose run --rm --build cli ...` uma vez, ou `docker compose build cli`.
+O `cli` não tem build próprio: usa a mesma imagem do serviço `api` (`<projeto>-app`). Assim, o `docker compose up --build` também atualiza a CLI, e o `docker compose run` seguinte já roda o `cli.py` novo. Se a imagem ainda não existir, o primeiro `run` a constrói.
 
 | Subcomando | Rota | Autenticação | O que faz |
 |---|---|---|---|
@@ -404,6 +404,8 @@ O `docker compose up --build` não reconstrói o serviço `cli` (ele está num p
 | `sessao` | `GET /api/cli/sessao` | Bearer (`TOKEN_CLI`) | Mostra o usuário dono do token |
 
 Códigos de saída: `0` sucesso, `1` erro da API ou API fora do ar, `2` uso incorreto (subcomando ou opção inválidos), `3` não autenticado (sem token, token inválido/expirado ou credenciais inválidas).
+
+Erros são mostrados numa linha no stderr, sem traceback: `Erro: <mensagem da API> (HTTP <status>)` quando a API responde com erro, e `Erro: não foi possível conectar à API em <URL_API> (<motivo>)` quando ela está fora do ar ou a resposta não é da API (não é HTTP, não é um objeto JSON, veio cortada).
 
 ### Obter o token e configurar a variável de ambiente
 
@@ -422,7 +424,7 @@ Códigos de saída: `0` sucesso, `1` erro da API ou API fora do ar, `2` uso inco
    docker compose run --rm cli sessao   # Autenticado como Administrador (admin)
    ```
 
-   Ou, num passo só (sem TTY, a senha vem de `SENHA_CLI`). Passe `-e SENHA_CLI` **sem valor**, para o Compose copiar a variável do seu terminal: assim a senha não fica no histórico do shell nem na linha de comando:
+   Ou, num passo só (sem TTY, a senha vem de `SENHA_CLI`; rode antes o `docker compose up --build`, para o log do build não se misturar ao token). Passe `-e SENHA_CLI` **sem valor**, para o Compose copiar a variável do seu terminal: assim a senha não fica no histórico do shell nem na linha de comando:
 
    ```bash
    read -rs SENHA_CLI && export SENHA_CLI   # digita a senha sem eco
@@ -430,9 +432,9 @@ Códigos de saída: `0` sucesso, `1` erro da API ou API fora do ar, `2` uso inco
    unset SENHA_CLI
    ```
 
-Os comandos protegidos enviam `Authorization: Bearer <TOKEN_CLI>`. Espaços e quebras de linha que o copiar/colar trouxer para o `TOKEN_CLI` são ignorados. Sem `TOKEN_CLI`, a CLI avisa e nem chama a API; com token inválido ou expirado, a API responde **HTTP 401** e a CLI pede um novo `login`. O token da CLI usa um salt próprio: token da Web não vale na CLI, e vice-versa.
+Os comandos protegidos enviam `Authorization: Bearer <TOKEN_CLI>`. Espaços e quebras de linha que o copiar/colar trouxer para o `TOKEN_CLI` são ignorados. Sem `TOKEN_CLI`, ou com caracteres que um token nunca tem (ex.: aspas tipográficas `‘…’`), a CLI avisa e nem chama a API; com token inválido ou expirado, a API responde **HTTP 401** e a CLI pede um novo `login`. O token da CLI usa um salt próprio: token da Web não vale na CLI, e vice-versa.
 
-Para usar a CLI contra outra API, defina `URL_API` (padrão `http://api:8000`, o serviço do Compose).
+Para usar a CLI contra outra API, defina `URL_API` (padrão `http://api:8000`, o serviço do Compose). A CLI **não segue redirecionamentos** (HTTP 3xx), para o token não ser reenviado a outro endereço: aponte `URL_API` direto para a API.
 
 ### Endpoints desta issue
 
@@ -444,7 +446,7 @@ Para usar a CLI contra outra API, defina `URL_API` (padrão `http://api:8000`, o
 
 ### Logs
 
-Os eventos usam `client: "cli"`. A emissão de token registra `operation: "token"` na camada `api` e a consulta do usuário (`consultar_usuario`) na camada `db`, com o mesmo `request_id`. Credenciais inválidas (`token`) e token ausente, inválido ou expirado (`sessao`) geram `WARN` com `status: "error"`. **Senha e token nunca são registrados.**
+Os eventos usam `client: "cli"`. A emissão de token registra `operation: "token"` na camada `api` e a consulta do usuário (`consultar_usuario_cli`, função `db.buscar_usuario_cli`) na camada `db`, com o mesmo `request_id`. Credenciais inválidas (`token`) e token ausente, inválido ou expirado (`sessao`) geram `WARN` com `status: "error"`. **Senha e token nunca são registrados.**
 
 ```bash
 docker compose logs api | grep '"client": "cli"'
@@ -452,7 +454,7 @@ docker compose logs api | grep '"client": "cli"'
 
 ## Logs
 
-Cada evento é uma linha JSON no stdout, com `timestamp`, `level`, `layer` (`api`/`db`), `client` (`web`/`cli`), `operation`, `status`, `request_id` e `message`. API e banco compartilham o mesmo `request_id` dentro de uma requisição (também devolvido no header `X-Request-ID`). A inicialização do banco usa `client: "sistema"` e `request_id: "inicializacao"`. Erros não previstos na API viram `500 {"erro": "Erro interno"}` com log `ERROR`.
+Cada evento é uma linha JSON no stdout, com `timestamp`, `level`, `layer` (`api`/`db`), `client` (`web`/`cli`), `operation`, `status`, `request_id` e `message`. API e banco compartilham o mesmo `request_id` dentro de uma requisição (também devolvido no header `X-Request-ID`). A inicialização do banco usa `client: "sistema"` e `request_id: "inicializacao"`. Erros não previstos na API viram `500 {"erro": "Erro interno"}` com log `ERROR`. Nas rotas `/api/*`, rota inexistente e método não permitido também respondem em JSON (`404 {"erro": "Rota não encontrada"}`, `405 {"erro": "Método não permitido"}`, este com o header `Allow`), com log `WARN` e o `client` da rota (`cli` em `/api/cli/*`).
 
 ```bash
 docker compose logs -f api                           # acompanhar

@@ -9,12 +9,9 @@ import pytest
 
 import api
 import db
+from conftest import eventos_do_log
 
 HOJE = api.hoje()
-
-
-def _eventos(capsys):
-    return [json.loads(linha) for linha in capsys.readouterr().out.strip().splitlines()]
 
 
 def _conexao_quebrada():
@@ -77,7 +74,7 @@ def test_listar_produtos(cliente_http, cabecalho, capsys):
     arroz = next(p for p in produtos if p["nome"] == "Arroz 5 kg")
     assert arroz == {"id": _id_produto(), "nome": "Arroz 5 kg", "categoria": "Alimentos", "preco": "27.90"}
     request_id = resposta.headers["X-Request-ID"]
-    eventos = [e for e in _eventos(capsys) if e["request_id"] == request_id]
+    eventos = [e for e in eventos_do_log(capsys) if e["request_id"] == request_id]
     assert {e["layer"] for e in eventos} == {"api", "db"}
     assert {e["operation"] for e in eventos} == {"listar_produtos"}
 
@@ -104,7 +101,7 @@ def test_criar_venda_persiste_e_correlaciona_logs(cliente_http, cabecalho, capsy
     assert gravada["quantidade"] == 3 and str(gravada["valor_total"]) == "76.50"
 
     request_id = resposta.headers["X-Request-ID"]
-    eventos = [e for e in _eventos(capsys) if e["request_id"] == request_id]
+    eventos = [e for e in eventos_do_log(capsys) if e["request_id"] == request_id]
     assert {e["layer"] for e in eventos} == {"api", "db"}
     assert all(e["client"] == "web" and e["operation"] == "criar_venda" for e in eventos)
     assert token not in json.dumps(eventos)
@@ -179,7 +176,7 @@ def test_criar_venda_produto_inexistente(cliente_http, cabecalho, capsys):
     assert resposta.status_code == 422
     assert set(resposta.get_json()["campos"]) == {"produto_id"}
     request_id = resposta.headers["X-Request-ID"]
-    camadas = {e["layer"] for e in _eventos(capsys) if e["request_id"] == request_id}
+    camadas = {e["layer"] for e in eventos_do_log(capsys) if e["request_id"] == request_id}
     assert camadas == {"api", "db"}
 
 
@@ -208,7 +205,7 @@ def test_consultar_venda_inexistente_registra_warn_nas_duas_camadas(cliente_http
     capsys.readouterr()
     resposta = cliente_http.get("/api/web/records/999999", headers=cabecalho)
     request_id = resposta.headers["X-Request-ID"]
-    eventos = [e for e in _eventos(capsys) if e["request_id"] == request_id]
+    eventos = [e for e in eventos_do_log(capsys) if e["request_id"] == request_id]
     assert {e["layer"] for e in eventos} == {"api", "db"}
     assert all(e["level"] == "WARN" and e["status"] == "error" for e in eventos)
 
@@ -221,7 +218,7 @@ def test_id_de_venda_invalido(cliente_http, cabecalho, capsys, metodo, id_venda)
     assert resposta.status_code == 400
     assert resposta.get_json() == {"erro": "Número da venda inválido."}
     request_id = resposta.headers["X-Request-ID"]
-    eventos = [e for e in _eventos(capsys) if e["request_id"] == request_id]
+    eventos = [e for e in eventos_do_log(capsys) if e["request_id"] == request_id]
     assert [(e["layer"], e["level"]) for e in eventos] == [("api", "WARN")]
 
 
@@ -252,7 +249,7 @@ def test_editar_venda_atualiza_e_correlaciona_logs(cliente_http, cabecalho, vend
     assert consulta == venda
 
     request_id = resposta.headers["X-Request-ID"]
-    eventos = [e for e in _eventos(capsys) if e["request_id"] == request_id]
+    eventos = [e for e in eventos_do_log(capsys) if e["request_id"] == request_id]
     assert {e["layer"] for e in eventos} == {"api", "db"}
     assert all(e["operation"] == "editar_venda" for e in eventos)
 
@@ -325,17 +322,17 @@ def test_db_criar_consultar_e_editar_venda(capsys):
     assert db.consultar_venda_web(criada["id"], "req-v2") == criada
     editada = db.editar_venda_web(criada["id"], _venda_db(quantidade=4), "req-v3")
     assert str(editada["valor_total"]) == "20.00"
-    eventos = _eventos(capsys)
+    eventos = eventos_do_log(capsys)
     assert [e["operation"] for e in eventos[-3:]] == ["criar_venda", "consultar_venda", "editar_venda"]
     assert all(e["layer"] == "db" and e["client"] == "web" and e["status"] == "success" for e in eventos[-3:])
 
 
 def test_db_venda_inexistente(capsys):
     assert db.consultar_venda_web(999999, "req-v4") is None
-    evento = _eventos(capsys)[-1]
+    evento = eventos_do_log(capsys)[-1]
     assert evento["level"] == "WARN" and evento["status"] == "error" and evento["request_id"] == "req-v4"
     assert db.editar_venda_web(999999, _venda_db(), "req-v5") is None
-    evento = _eventos(capsys)[-1]
+    evento = eventos_do_log(capsys)[-1]
     assert evento["level"] == "WARN" and evento["status"] == "error" and evento["request_id"] == "req-v5"
 
 
@@ -345,7 +342,7 @@ def test_db_produto_inexistente(capsys):
     criada = db.criar_venda_web(_venda_db(), "req-v7")
     with pytest.raises(db.ProdutoInexistente):
         db.editar_venda_web(criada["id"], _venda_db(produto_id=999999), "req-v8")
-    evento = _eventos(capsys)[-1]
+    evento = eventos_do_log(capsys)[-1]
     assert evento["level"] == "WARN" and evento["operation"] == "editar_venda"
 
 
@@ -362,5 +359,5 @@ def test_db_erro_no_banco(monkeypatch, capsys, funcao, argumentos, operacao):
     monkeypatch.setattr(db, "obter_conexao", _conexao_quebrada)
     with pytest.raises(psycopg.OperationalError):
         funcao(*argumentos, "req-v9")
-    evento = _eventos(capsys)[-1]
+    evento = eventos_do_log(capsys)[-1]
     assert evento["level"] == "ERROR" and evento["operation"] == operacao and evento["request_id"] == "req-v9"

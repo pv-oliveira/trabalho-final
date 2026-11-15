@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 
@@ -12,6 +13,11 @@ import db  # noqa: E402
 USUARIO_TESTE = "testador"
 SENHA_TESTE = "senha-de-teste"
 NOME_TESTE = "Pessoa de Teste"
+
+
+def eventos_do_log(capsys):
+    """Eventos de log (linhas JSON) capturados no stdout desde a última leitura do `capsys`."""
+    return [json.loads(linha) for linha in capsys.readouterr().out.splitlines() if linha.startswith("{")]
 
 
 @pytest.fixture(autouse=True)

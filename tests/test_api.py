@@ -1,15 +1,13 @@
 import json
 
 import psycopg
+import pytest
+from werkzeug.exceptions import ServiceUnavailable
 from werkzeug.security import check_password_hash
 
 import api
 import db
-from conftest import NOME_TESTE, SENHA_TESTE, USUARIO_TESTE
-
-
-def _eventos(capsys):
-    return [json.loads(linha) for linha in capsys.readouterr().out.strip().splitlines()]
+from conftest import NOME_TESTE, SENHA_TESTE, USUARIO_TESTE, eventos_do_log
 
 
 def test_saude_e_publica(cliente_http, capsys):
@@ -17,7 +15,7 @@ def test_saude_e_publica(cliente_http, capsys):
     assert resposta.status_code == 200
     assert resposta.get_json() == {"status": "ok"}
     assert resposta.headers["X-Request-ID"].startswith("req-")
-    evento = _eventos(capsys)[-1]
+    evento = eventos_do_log(capsys)[-1]
     assert evento["layer"] == "api" and evento["operation"] == "health"
 
 
@@ -28,7 +26,7 @@ def test_login_sucesso_correlaciona_logs_api_e_banco(cliente_http, capsys):
     corpo = resposta.get_json()
     assert corpo["usuario"] == USUARIO_TESTE and corpo["nome"] == NOME_TESTE and corpo["token"]
 
-    eventos = _eventos(capsys)
+    eventos = eventos_do_log(capsys)
     request_id = resposta.headers["X-Request-ID"]
     camadas = {e["layer"] for e in eventos if e["request_id"] == request_id}
     assert camadas == {"api", "db"}
@@ -77,12 +75,50 @@ def test_erro_inesperado_responde_json_e_registra_log(cliente_http, monkeypatch,
     resposta = cliente_http.post("/api/web/login", json={"usuario": USUARIO_TESTE, "senha": SENHA_TESTE})
     assert resposta.status_code == 500
     assert resposta.get_json() == {"erro": "Erro interno"}
-    evento = _eventos(capsys)[-1]
+    evento = eventos_do_log(capsys)[-1]
     assert evento["level"] == "ERROR" and evento["layer"] == "api" and evento["operation"] == "web_login"
 
 
-def test_rota_inexistente_mantem_404(cliente_http):
-    assert cliente_http.get("/api/web/nao-existe").status_code == 404
+@pytest.mark.parametrize(("rota", "cliente"), [("/api/web/nao-existe", "web"), ("/api/cli/nao-existe", "cli")])
+def test_rota_inexistente_em_api_responde_404_em_json_com_log(cliente_http, capsys, rota, cliente):
+    capsys.readouterr()
+    resposta = cliente_http.get(rota)
+    assert resposta.status_code == 404
+    assert resposta.get_json() == {"erro": "Rota não encontrada"}
+    evento = eventos_do_log(capsys)[-1]
+    assert evento["level"] == "WARN" and evento["status"] == "error" and evento["layer"] == "api"
+    assert evento["client"] == cliente and evento["operation"] == "erro_http"
+    assert evento["request_id"] == resposta.headers["X-Request-ID"] and rota in evento["message"]
+
+
+@pytest.mark.parametrize(("rota", "cliente"), [("/api/web/health", "web"), ("/api/cli/health", "cli")])
+def test_metodo_nao_permitido_em_api_responde_405_em_json_com_log(cliente_http, capsys, rota, cliente):
+    capsys.readouterr()
+    resposta = cliente_http.delete(rota)
+    assert resposta.status_code == 405
+    assert resposta.get_json() == {"erro": "Método não permitido"}
+    assert "GET" in resposta.headers["Allow"]
+    evento = eventos_do_log(capsys)[-1]
+    assert evento["level"] == "WARN" and evento["client"] == cliente and "DELETE" in evento["message"]
+
+
+def test_erro_http_fora_de_api_mantem_a_resposta_padrao(cliente_http):
+    resposta = cliente_http.get("/nao-existe")
+    assert resposta.status_code == 404
+    assert resposta.get_json(silent=True) is None
+
+
+def test_erro_http_5xx_em_api_registra_error(cliente_http, capsys, monkeypatch):
+    def indisponivel():
+        raise ServiceUnavailable()
+
+    monkeypatch.setitem(api.app.view_functions, "web_saude", indisponivel)
+    capsys.readouterr()
+    resposta = cliente_http.get("/api/web/health")
+    assert resposta.status_code == 503
+    assert resposta.get_json() == {"erro": "Erro interno"}
+    evento = eventos_do_log(capsys)[-1]
+    assert evento["level"] == "ERROR" and evento["operation"] == "web_saude"
 
 
 def test_login_erro_no_banco(cliente_http, monkeypatch):

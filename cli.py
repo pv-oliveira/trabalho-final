@@ -10,6 +10,7 @@ Execução (via Docker Compose, sem instalar nada no host):
 
 import argparse
 import getpass
+import http.client
 import json
 import os
 import sys
@@ -38,7 +39,7 @@ class ErroDaApi(Exception):
     def mensagem(self):
         if isinstance(self.corpo, dict) and isinstance(self.corpo.get("erro"), str):
             return self.corpo["erro"]
-        return f"HTTP {self.status}"
+        return "resposta inesperada da API"
 
 
 class ApiIndisponivel(Exception):
@@ -49,12 +50,34 @@ class TokenAusente(Exception):
     """O comando é protegido e TOKEN_CLI não foi informado."""
 
 
+class TokenInvalido(Exception):
+    """TOKEN_CLI tem caracteres que um token nunca tem (ex.: aspas tipográficas do copiar/colar)."""
+
+
+class _SemRedirecionamento(urllib.request.HTTPRedirectHandler):
+    """Não segue redirecionamentos: o urllib reenviaria o `Authorization` para o novo endereço.
+
+    A API nunca redireciona; um 3xx vira HTTPError e é tratado como resposta inesperada.
+    """
+
+    def redirect_request(self, *_args, **_kwargs):
+        return None
+
+
+_ABRIDOR = urllib.request.build_opener(_SemRedirecionamento)
+
+
+def abrir_url(requisicao):
+    """Envia a requisição, sem seguir redirecionamentos."""
+    return _ABRIDOR.open(requisicao, timeout=TEMPO_LIMITE)
+
+
 def url_api():
     return (os.environ.get("URL_API") or URL_API_PADRAO).rstrip("/")
 
 
 def token_do_ambiente():
-    """Token lido de TOKEN_CLI. Lança TokenAusente se a variável estiver vazia ou ausente.
+    """Token lido de TOKEN_CLI. Lança TokenAusente se estiver vazio e TokenInvalido se não for ASCII imprimível.
 
     Remove todo espaço e quebra de linha (das pontas e do meio), que o copiar/colar costuma trazer:
     o token assinado nunca os contém, e no cabeçalho HTTP eles fariam a requisição ser recusada.
@@ -62,6 +85,8 @@ def token_do_ambiente():
     token = "".join(os.environ.get(VARIAVEL_TOKEN, "").split())
     if not token:
         raise TokenAusente
+    if not (token.isascii() and token.isprintable()):
+        raise TokenInvalido
     return token
 
 
@@ -78,32 +103,41 @@ def requisitar(metodo, caminho, corpo=None, token=None):
         requisicao = urllib.request.Request(
             f"{url_api()}/api/cli{caminho}", data=dados, headers=cabecalhos, method=metodo
         )
-        with urllib.request.urlopen(requisicao, timeout=TEMPO_LIMITE) as resposta:
+        with abrir_url(requisicao) as resposta:
             conteudo = resposta.read()
     except urllib.error.HTTPError as erro:
         with erro:
             try:
                 conteudo = json.loads(erro.read().decode("utf-8"))
-            except ValueError:
-                conteudo = None
+            except (ValueError, http.client.HTTPException, OSError):
+                conteudo = None  # corpo que não é JSON, ou cortado no meio
         raise ErroDaApi(erro.code, conteudo) from None
-    except (urllib.error.URLError, OSError) as erro:
-        raise ApiIndisponivel(str(erro)) from None
+    except (urllib.error.URLError, http.client.HTTPException, OSError) as erro:
+        # HTTPException: resposta que não é HTTP (ex.: URL_API apontando para o banco) ou cortada no meio.
+        raise ApiIndisponivel(str(erro) or type(erro).__name__) from None
     except ValueError:
         # URL_API inválida ou cabeçalho recusado. Sem str(erro): a mensagem do Python repete o cabeçalho, com o token.
         raise ApiIndisponivel("URL ou requisição inválida") from None
     try:
-        return json.loads(conteudo.decode("utf-8"))
+        resultado = json.loads(conteudo.decode("utf-8"))
     except ValueError:
         raise ApiIndisponivel("a resposta não é JSON") from None
+    if not isinstance(resultado, dict):
+        raise ApiIndisponivel("a resposta não é um objeto JSON")
+    return resultado
+
+
+def _quantidade(numero, singular, plural):
+    return f"{numero} {singular if numero == 1 else plural}"
 
 
 def descrever_validade(segundos):
-    """Validade do token em texto: "8 horas", "1 hora" ou "90 minutos"."""
-    horas, resto = divmod(segundos, 3600)
-    if resto:
-        return f"{segundos // 60} minutos"
-    return f"{horas} hora" if horas == 1 else f"{horas} horas"
+    """Validade do token em texto, na maior unidade exata: "8 horas", "1 hora", "90 minutos", "30 segundos"."""
+    if segundos and segundos % 3600 == 0:
+        return _quantidade(segundos // 3600, "hora", "horas")
+    if segundos and segundos % 60 == 0:
+        return _quantidade(segundos // 60, "minuto", "minutos")
+    return _quantidade(segundos, "segundo", "segundos")
 
 
 def perguntar(texto):
@@ -181,6 +215,13 @@ def main(argv=None):
         return argumentos.funcao(argumentos)
     except TokenAusente:
         print(f"Erro: comando protegido. Obtenha um token com 'login' e defina {VARIAVEL_TOKEN}.", file=sys.stderr)
+        return SAIDA_NAO_AUTENTICADO
+    except TokenInvalido:
+        print(
+            f"Erro: {VARIAVEL_TOKEN} tem caracteres inválidos (ex.: aspas tipográficas). "
+            f"Copie o token de novo, sem aspas, ou gere outro com 'login'.",
+            file=sys.stderr,
+        )
         return SAIDA_NAO_AUTENTICADO
     except ErroDaApi as erro:
         print(f"Erro: {erro.mensagem} (HTTP {erro.status})", file=sys.stderr)
