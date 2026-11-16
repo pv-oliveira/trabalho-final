@@ -497,6 +497,64 @@ def excluir_venda_cli(id_venda, request_id):
     return True
 
 
+# Busca avançada pela CLI (#10). Consulta própria da CLI, com os mesmos filtros e a mesma regra da
+# busca da Web (#4), para os mesmos parâmetros darem o mesmo resultado nos dois clientes.
+# Filtros (nome do parâmetro -> condição SQL), combinados com AND. Os valores só entram como
+# parâmetros, nunca no texto da consulta.
+CONDICOES_BUSCA_CLI = {
+    "produto_id": "venda.produto_id = %(produto_id)s",
+    "categoria": "produto.categoria = %(categoria)s",
+    "data_inicio": "venda.data_venda >= %(data_inicio)s",
+    "data_fim": "venda.data_venda <= %(data_fim)s",
+}
+CAMPOS_BUSCA_CLI = tuple(CONDICOES_BUSCA_CLI)
+
+
+def buscar_vendas_cli(filtros, pagina, tamanho, ordenar, direcao, request_id):
+    """Retorna (vendas da página, total de vendas encontradas) para o comando `buscar` da CLI.
+
+    `filtros` pode ter as chaves de CONDICOES_BUSCA_CLI; os ausentes não restringem a busca.
+    `tamanho` é o número de vendas por página. `ordenar` deve ser uma chave de COLUNAS_ORDENACAO_CLI
+    e `direcao`, "asc" ou "desc". O id desempata a ordenação, para a paginação ser estável.
+    """
+    condicoes = [sql.SQL(CONDICOES_BUSCA_CLI[campo]) for campo in CAMPOS_BUSCA_CLI if campo in filtros]
+    onde = sql.SQL("WHERE ") + sql.SQL(" AND ").join(condicoes) if condicoes else sql.SQL("")
+    sentido = sql.SQL("DESC" if direcao == "desc" else "ASC")
+    contagem = sql.SQL(
+        "SELECT COUNT(*) AS total FROM venda JOIN produto ON produto.id = venda.produto_id {onde}"
+    ).format(onde=onde)
+    consulta = sql.SQL(
+        """
+        SELECT venda.id, venda.produto_id, produto.nome AS produto_nome, produto.categoria,
+               venda.quantidade, venda.valor_unitario, venda.valor_total, venda.data_venda
+        FROM venda JOIN produto ON produto.id = venda.produto_id
+        {onde}
+        ORDER BY {coluna} {sentido}, venda.id {sentido}
+        LIMIT %(limite)s OFFSET %(deslocamento)s
+        """
+    ).format(onde=onde, coluna=sql.SQL(COLUNAS_ORDENACAO_CLI[ordenar]), sentido=sentido)
+    parametros = {**filtros, "limite": tamanho, "deslocamento": (pagina - 1) * tamanho}
+    try:
+        with obter_conexao() as conexao:
+            # A contagem e a página veem o mesmo snapshot, então o total bate com as linhas devolvidas.
+            conexao.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+            conexao.read_only = True
+            total = conexao.execute(contagem, filtros).fetchone()["total"]
+            linhas = conexao.execute(consulta, parametros).fetchall()
+    except psycopg.Error:
+        registrar_log("ERROR", "cli", "buscar_vendas", "error", request_id, "Falha ao buscar vendas")
+        raise
+    registrar_log(
+        "INFO",
+        "cli",
+        "buscar_vendas",
+        "success",
+        request_id,
+        f"Página {pagina}: {len(linhas)} de {total} vendas ({', '.join(sorted(filtros)) or 'sem filtros'})",
+    )
+    return linhas, total
+
+
 # Indicadores do dashboard da Web (#6). Consultas próprias, lidas no mesmo snapshot.
 MESES_DASHBOARD = 12
 TOP_PRODUTOS_DASHBOARD = 5

@@ -575,11 +575,15 @@ def ler_filtros_busca(erros):
     return filtros
 
 
-def filtros_para_json(filtros):
-    """Todos os filtros da busca, com `null` nos ausentes e as datas em AAAA-MM-DD."""
+def filtros_para_json(filtros, campos=None):
+    """Todos os filtros da busca, com `null` nos ausentes e as datas em AAAA-MM-DD.
+
+    `campos` são os filtros da busca do cliente da rota (padrão: os da Web).
+    """
+    campos = db.CAMPOS_BUSCA_WEB if campos is None else campos
     return {
         campo: valor.isoformat() if isinstance(valor, date) else valor
-        for campo in db.CAMPOS_BUSCA_WEB
+        for campo in campos
         for valor in [filtros.get(campo)]
     }
 
@@ -717,10 +721,8 @@ def web_excluir_venda(id_venda):
     return jsonify(id=id_venda, mensagem="Venda excluída."), 200
 
 
-@app.get("/api/cli/records")
-@exigir_autenticacao_cli("listar_vendas")
-def cli_listar_vendas():
-    erros = {}
+def ler_paginacao_cli(erros):
+    """Lê `pagina`, `tamanho`, `ordenar` e `direcao` da listagem e da busca da CLI, anotando os inválidos em `erros`."""
     pagina = ler_pagina(request.args.get("pagina", "1"))
     if pagina is None:
         erros["pagina"] = f"A página deve ser um número inteiro entre 1 e {PAGINA_MAXIMA}."
@@ -728,6 +730,27 @@ def cli_listar_vendas():
     if tamanho is None:
         erros["tamanho"] = f"O tamanho da página deve ser um número inteiro entre 1 e {TAMANHO_MAXIMO_CLI}."
     ordenar, direcao = ler_ordenacao(erros, db.COLUNAS_ORDENACAO_CLI)
+    return pagina, tamanho, ordenar, direcao
+
+
+def corpo_da_pagina_cli(linhas, total, pagina, tamanho, ordenar, direcao):
+    """Campos comuns às respostas da listagem e da busca da CLI."""
+    return {
+        "vendas": [venda_para_json(linha) for linha in linhas],
+        "pagina": pagina,
+        "itens_por_pagina": tamanho,
+        "total": total,
+        "total_paginas": max(1, -(-total // tamanho)),
+        "ordenar": ordenar,
+        "direcao": direcao,
+    }
+
+
+@app.get("/api/cli/records")
+@exigir_autenticacao_cli("listar_vendas")
+def cli_listar_vendas():
+    erros = {}
+    pagina, tamanho, ordenar, direcao = ler_paginacao_cli(erros)
     if erros:
         return resposta_parametros_invalidos("listar_vendas", erros)
 
@@ -735,20 +758,35 @@ def cli_listar_vendas():
         linhas, total = db.listar_vendas_cli(pagina, tamanho, ordenar, direcao, g.request_id)
     except psycopg.Error:
         return resposta_falha_no_banco("listar_vendas")
-    total_paginas = max(1, -(-total // tamanho))
-    registrar_log("INFO", "cli", "listar_vendas", "success", f"Página {pagina} de {total_paginas} listada")
-    return (
-        jsonify(
-            vendas=[venda_para_json(linha) for linha in linhas],
-            pagina=pagina,
-            itens_por_pagina=tamanho,
-            total=total,
-            total_paginas=total_paginas,
-            ordenar=ordenar,
-            direcao=direcao,
-        ),
-        200,
+    corpo = corpo_da_pagina_cli(linhas, total, pagina, tamanho, ordenar, direcao)
+    registrar_log("INFO", "cli", "listar_vendas", "success", f"Página {pagina} de {corpo['total_paginas']} listada")
+    return jsonify(corpo), 200
+
+
+@app.get("/api/cli/records/search")
+@exigir_autenticacao_cli("buscar_vendas")
+def cli_buscar_vendas():
+    """Busca da CLI: mesmos filtros e mesmas validações da busca da Web (#4), com a consulta própria da CLI."""
+    erros = {}
+    filtros = ler_filtros_busca(erros)
+    pagina, tamanho, ordenar, direcao = ler_paginacao_cli(erros)
+    if erros:
+        return resposta_parametros_invalidos("buscar_vendas", erros)
+
+    try:
+        linhas, total = db.buscar_vendas_cli(filtros, pagina, tamanho, ordenar, direcao, g.request_id)
+    except psycopg.Error:
+        return resposta_falha_no_banco("buscar_vendas")
+    corpo = corpo_da_pagina_cli(linhas, total, pagina, tamanho, ordenar, direcao)
+    corpo["filtros"] = filtros_para_json(filtros, db.CAMPOS_BUSCA_CLI)
+    registrar_log(
+        "INFO",
+        "cli",
+        "buscar_vendas",
+        "success",
+        f"Busca ({', '.join(sorted(filtros)) or 'sem filtros'}): {total} vendas, página {pagina} de {corpo['total_paginas']}",
     )
+    return jsonify(corpo), 200
 
 
 @app.delete("/api/cli/records/<id_venda>")
