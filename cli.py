@@ -13,6 +13,7 @@ Execução (via Docker Compose, sem instalar nada no host):
     TOKEN_CLI=<token> docker compose run --rm cli excluir 7
     TOKEN_CLI=<token> docker compose run --rm cli buscar --categoria Bebidas --data-inicio 2026-10-01 --data-fim 2026-10-31
     TOKEN_CLI=<token> docker compose run --rm -T cli exportar --categoria Bebidas > vendas.csv
+    TOKEN_CLI=<token> docker compose run --rm cli indicadores
 """
 
 import argparse
@@ -62,6 +63,11 @@ OPCOES_BUSCA = {
     "data_inicio": "--data-inicio",
     "data_fim": "--data-fim",
 }
+
+# Indicadores (#12): meses abreviados como no gráfico da Web e largura máxima das barras de texto.
+MESES_ABREVIADOS = ("jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez")
+LARGURA_BARRA = 30
+BLOCO_BARRA = "█"
 
 # Colunas aceitas em --ordenar (as mesmas chaves que a API aceita em /api/cli/records).
 COLUNAS_ORDENACAO = ("id", "data_venda", "produto_nome", "categoria", "quantidade", "valor_total")
@@ -495,6 +501,91 @@ def _escrever_na_saida_padrao(conteudo):
     return True
 
 
+def inteiro_brasileiro(numero):
+    """Inteiro com separador de milhar brasileiro: 1234 -> "1.234"."""
+    return f"{numero:,}".replace(",", ".")
+
+
+def mes_brasileiro(ano_mes):
+    """Mês da API ("2026-10") no formato do gráfico da Web ("out/2026")."""
+    ano, mes = ano_mes.split("-")
+    return f"{MESES_ABREVIADOS[int(mes) - 1]}/{ano}"
+
+
+def barra_de_texto(valor, maximo):
+    """Barra proporcional ao maior valor do indicador, como no gráfico da Web.
+
+    Zero não desenha barra; um valor positivo tem pelo menos um bloco, para não parecer zero.
+    """
+    if valor <= 0 or maximo <= 0:
+        return ""
+    return BLOCO_BARRA * max(1, round(valor / maximo * LARGURA_BARRA))
+
+
+def _linhas_com_barras(itens):
+    """Linhas de um indicador. `itens` = [(rótulo, valor formatado, valor numérico)], com as colunas alinhadas."""
+    maximo = max(valor for _, _, valor in itens)
+    largura_rotulo = max(len(rotulo) for rotulo, _, _ in itens)
+    largura_texto = max(len(texto) for _, texto, _ in itens)
+    return [
+        f"  {rotulo:<{largura_rotulo}}  {texto:>{largura_texto}}  {barra_de_texto(valor, maximo)}".rstrip()
+        for rotulo, texto, valor in itens
+    ]
+
+
+def _indicador(titulo, itens, texto_vazio, tem_dados):
+    """Título do indicador seguido das linhas, ou da mesma mensagem da Web quando não há o que mostrar."""
+    return ["", titulo, *(_linhas_com_barras(itens) if tem_dados else [f"  {texto_vazio}"])]
+
+
+def formatar_indicadores(corpo):
+    """Linhas de texto com o resumo e os 3 indicadores do dashboard da Web (#6), na mesma ordem e com os mesmos valores.
+
+    Lança ApiIndisponivel se a resposta não tiver os indicadores no formato esperado: nada é impresso pela metade.
+    """
+    try:
+        resumo = corpo["resumo"]
+        meses = [
+            (mes_brasileiro(item["mes"]), moeda(item["total"]), Decimal(item["total"]))
+            for item in corpo["faturamento_por_mes"]
+        ]
+        categorias = [
+            (item["categoria"], moeda(item["total"]), Decimal(item["total"])) for item in corpo["faturamento_por_categoria"]
+        ]
+        produtos = [
+            (
+                f"{posicao}. {item['produto_nome']}",
+                f"{inteiro_brasileiro(item['quantidade'])} {'unidade' if item['quantidade'] == 1 else 'unidades'}",
+                item["quantidade"],
+            )
+            for posicao, item in enumerate(corpo["top_produtos"], start=1)
+        ]
+        return [
+            f"Vendas registradas (todo o período): {inteiro_brasileiro(resumo['total_vendas'])}",
+            f"Faturamento total (todo o período): {moeda(resumo['faturamento_total'])}",
+            # Mesmas regras de vazio da Web: os meses somem se todos forem zero; as categorias do catálogo
+            # aparecem mesmo zeradas; o top 5 só tem produtos vendidos.
+            *_indicador(
+                f"Faturamento por mês (últimos {len(meses)} meses)",
+                meses,
+                f"Sem vendas nos últimos {len(meses)} meses.",
+                any(valor > 0 for _, _, valor in meses),
+            ),
+            *_indicador("Faturamento por categoria", categorias, "Nenhuma categoria cadastrada.", bool(categorias)),
+            *_indicador("Top 5 produtos (mais unidades vendidas)", produtos, "Sem vendas registradas.", bool(produtos)),
+        ]
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError, ArithmeticError):
+        # ArithmeticError inclui o InvalidOperation do Decimal (valor que não é número).
+        raise ApiIndisponivel("a resposta não tem os indicadores esperados") from None
+
+
+def comando_indicadores(_argumentos):
+    """Comando protegido: GET /api/cli/dashboard. Mostra em texto os 3 indicadores do dashboard da Web."""
+    corpo = requisitar("GET", "/dashboard", token=token_do_ambiente())
+    print("\n".join(formatar_indicadores(corpo)))
+    return SAIDA_SUCESSO
+
+
 def comando_excluir(argumentos):
     """Comando protegido: DELETE /api/cli/records/{id}. Pede confirmação, a menos que se use --sim."""
     token = token_do_ambiente()  # sem token, avisa antes de perguntar qualquer coisa
@@ -673,6 +764,17 @@ def criar_parser():
         "--substituir", action="store_true", help="com --arquivo, sobrescreve o arquivo se ele já existir"
     )
     exportar.set_defaults(funcao=comando_exportar)
+
+    indicadores = subcomandos.add_parser(
+        "indicadores",
+        aliases=["dashboard"],
+        help="mostra em texto os 3 indicadores do dashboard da Web (protegido)",
+        description=(
+            "Mostra em texto o resumo e os 3 indicadores do dashboard da Web, com os mesmos valores: "
+            "faturamento por mês (últimos 12 meses), faturamento por categoria e top 5 produtos."
+        ),
+    )
+    _traduzir_ajuda(indicadores).set_defaults(funcao=comando_indicadores)
 
     excluir = subcomandos.add_parser(
         "excluir",
