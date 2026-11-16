@@ -678,6 +678,28 @@ def resposta_csv(linhas, origem, filtros):
     )
 
 
+def indicadores_para_json(indicadores):
+    """Corpo JSON dos indicadores, o mesmo no dashboard da Web (#6) e no comando `indicadores` da CLI (#12)."""
+    resumo = indicadores["resumo"]
+    return {
+        "resumo": {
+            "total_vendas": resumo["total_vendas"],
+            "faturamento_total": valor_json(resumo["faturamento_total"]),
+        },
+        "faturamento_por_mes": [
+            {"mes": linha["mes"], "total": valor_json(linha["total"])} for linha in indicadores["faturamento_por_mes"]
+        ],
+        "faturamento_por_categoria": [
+            {"categoria": linha["categoria"], "total": valor_json(linha["total"])}
+            for linha in indicadores["faturamento_por_categoria"]
+        ],
+        "top_produtos": [
+            {"produto_id": linha["produto_id"], "produto_nome": linha["produto_nome"], "quantidade": linha["quantidade"]}
+            for linha in indicadores["top_produtos"]
+        ],
+    }
+
+
 @app.get("/api/web/dashboard")
 @exigir_autenticacao_web("dashboard")
 def web_dashboard():
@@ -688,26 +710,7 @@ def web_dashboard():
         return resposta_falha_no_banco("dashboard")
     resumo = indicadores["resumo"]
     registrar_log("INFO", "web", "dashboard", "success", f"Indicadores enviados ({resumo['total_vendas']} vendas)")
-    return (
-        jsonify(
-            resumo={
-                "total_vendas": resumo["total_vendas"],
-                "faturamento_total": valor_json(resumo["faturamento_total"]),
-            },
-            faturamento_por_mes=[
-                {"mes": linha["mes"], "total": valor_json(linha["total"])} for linha in indicadores["faturamento_por_mes"]
-            ],
-            faturamento_por_categoria=[
-                {"categoria": linha["categoria"], "total": valor_json(linha["total"])}
-                for linha in indicadores["faturamento_por_categoria"]
-            ],
-            top_produtos=[
-                {"produto_id": linha["produto_id"], "produto_nome": linha["produto_nome"], "quantidade": linha["quantidade"]}
-                for linha in indicadores["top_produtos"]
-            ],
-        ),
-        200,
-    )
+    return jsonify(indicadores_para_json(indicadores)), 200
 
 
 @app.delete("/api/web/records/<id_venda>")
@@ -828,6 +831,20 @@ def cli_excluir_venda(id_venda):
         return resposta_venda_nao_encontrada("excluir_venda", id_venda)
     registrar_log("INFO", "cli", "excluir_venda", "success", f"Venda {id_venda} excluída")
     return jsonify(id=id_venda, mensagem="Venda excluída."), 200
+
+
+@app.get("/api/cli/dashboard")
+@exigir_autenticacao_cli("dashboard")
+def cli_dashboard():
+    """Indicadores da CLI: os mesmos 3 indicadores e valores do dashboard da Web, com a consulta própria da CLI."""
+    try:
+        # Mesma data de referência da Web: os 12 meses terminam no mês de hoje, no fuso FUSO_HORARIO.
+        indicadores = db.indicadores_dashboard_cli(hoje(), g.request_id)
+    except psycopg.Error:
+        return resposta_falha_no_banco("dashboard")
+    resumo = indicadores["resumo"]
+    registrar_log("INFO", "cli", "dashboard", "success", f"Indicadores enviados ({resumo['total_vendas']} vendas)")
+    return jsonify(indicadores_para_json(indicadores)), 200
 
 
 def inicializar():

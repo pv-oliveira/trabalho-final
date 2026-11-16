@@ -672,3 +672,75 @@ def indicadores_dashboard_web(data_referencia, request_id):
         "faturamento_por_categoria": por_categoria,
         "top_produtos": top_produtos,
     }
+
+
+# Indicadores pela CLI (#12). Consultas próprias da CLI, com as mesmas regras do dashboard da Web (#6)
+# e as mesmas constantes (MESES_DASHBOARD, TOP_PRODUTOS_DASHBOARD), para mostrar os mesmos valores.
+def indicadores_dashboard_cli(data_referencia, request_id):
+    """Retorna o resumo e os 3 indicadores do dashboard para o comando `indicadores` da CLI.
+
+    Mesmo formato de `indicadores_dashboard_web`: resumo de todo o período, faturamento dos
+    MESES_DASHBOARD meses de calendário até o mês de `data_referencia` (mês sem venda = 0),
+    faturamento por categoria do catálogo (categoria sem venda = 0) e os TOP_PRODUTOS_DASHBOARD
+    produtos com mais unidades vendidas. Tudo lido no mesmo snapshot.
+    """
+    try:
+        with obter_conexao() as conexao:
+            # REPEATABLE READ: o resumo e os três indicadores veem as mesmas vendas; somente leitura.
+            conexao.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+            conexao.read_only = True
+            resumo = conexao.execute(
+                """
+                SELECT COUNT(venda.id) AS total_vendas, COALESCE(SUM(venda.valor_total), 0) AS faturamento_total
+                FROM venda
+                """
+            ).fetchone()
+            por_mes = conexao.execute(
+                """
+                SELECT to_char(janela.mes, 'YYYY-MM') AS mes, COALESCE(SUM(venda.valor_total), 0) AS total
+                FROM generate_series(
+                    date_trunc('month', %(referencia)s::timestamp) - make_interval(months => %(meses)s - 1),
+                    date_trunc('month', %(referencia)s::timestamp),
+                    interval '1 month'
+                ) AS janela(mes)
+                LEFT JOIN venda ON date_trunc('month', venda.data_venda::timestamp) = janela.mes
+                GROUP BY janela.mes
+                ORDER BY janela.mes
+                """,
+                {"referencia": data_referencia, "meses": MESES_DASHBOARD},
+            ).fetchall()
+            por_categoria = conexao.execute(
+                """
+                SELECT produto.categoria, COALESCE(SUM(venda.valor_total), 0) AS total
+                FROM produto LEFT JOIN venda ON venda.produto_id = produto.id
+                GROUP BY produto.categoria
+                ORDER BY total DESC, produto.categoria
+                """
+            ).fetchall()
+            top_produtos = conexao.execute(
+                """
+                SELECT produto.id AS produto_id, produto.nome AS produto_nome, SUM(venda.quantidade) AS quantidade
+                FROM venda JOIN produto ON produto.id = venda.produto_id
+                GROUP BY produto.id, produto.nome
+                ORDER BY quantidade DESC, produto.nome
+                LIMIT %(limite)s
+                """,
+                {"limite": TOP_PRODUTOS_DASHBOARD},
+            ).fetchall()
+    except psycopg.Error:
+        registrar_log("ERROR", "cli", "dashboard", "error", request_id, "Falha ao calcular os indicadores")
+        raise
+    registrar_log(
+        "INFO",
+        "cli",
+        "dashboard",
+        "success",
+        request_id,
+        f"Indicadores calculados sobre {resumo['total_vendas']} vendas",
+    )
+    return {
+        "resumo": resumo,
+        "faturamento_por_mes": por_mes,
+        "faturamento_por_categoria": por_categoria,
+        "top_produtos": top_produtos,
+    }
