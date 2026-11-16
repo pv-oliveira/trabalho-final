@@ -1,9 +1,11 @@
 """Testes da exportação CSV pela CLI (issue #11): rota /api/cli/records/export, banco e comando `exportar`."""
 
 import csv
+import errno
 import io
 import json
 import re
+import sys
 from datetime import date
 
 import psycopg
@@ -11,7 +13,7 @@ import pytest
 
 import cli
 import db
-from conftest import SENHA_TESTE, USUARIO_TESTE, eventos_do_log
+from conftest import SENHA_TESTE, USUARIO_TESTE, RespostaFixa, eventos_do_log
 
 CABECALHO = ["Nº", "Data", "Produto", "Categoria", "Quantidade", "Valor unitário", "Valor total"]
 
@@ -419,24 +421,143 @@ def test_exportar_com_token_invalido_sai_com_codigo_3(servidor_api, monkeypatch,
     assert "HTTP 401" in _erro(capsys) and not destino.exists()
 
 
-def test_exportar_para_pasta_inexistente_mostra_o_erro(com_token, vendas, tmp_path, capsys):
-    destino = tmp_path / "nao-existe" / "vendas.csv"
-    assert cli.main(["exportar", "--arquivo", str(destino)]) == cli.SAIDA_ERRO
-    assert f"Erro: não foi possível gravar {destino} (No such file or directory)." in _erro(capsys)
+def test_exportar_nao_sobrescreve_arquivo_existente(com_token, vendas, tmp_path, capsys):
+    destino = tmp_path / "vendas.csv"
+    destino.write_bytes(b"conteudo anterior")
+    assert cli.main(["exportar", "--categoria", "Alimentos", "--arquivo", str(destino)]) == cli.SAIDA_ERRO
+    assert _erro(capsys).splitlines()[-1] == f"Erro: {destino} já existe; use --substituir para sobrescrever."
+    assert destino.read_bytes() == b"conteudo anterior"
 
 
-class _RespostaFixa(io.BytesIO):
-    """Resposta HTTP 200 com o corpo e o Content-Type dados, usável no `with` como a de `urlopen`."""
+def test_exportar_com_substituir_sobrescreve_o_arquivo(com_token, vendas, tmp_path, capsys):
+    destino = tmp_path / "vendas.csv"
+    destino.write_bytes(b"conteudo anterior")
+    argv = ["exportar", "--categoria", "Higiene", "--arquivo", str(destino), "--substituir"]
+    assert cli.main(argv) == cli.SAIDA_SUCESSO
+    assert sorted(_ids(_linhas_csv(destino.read_bytes())[1])) == sorted([vendas["sabonete_out"], vendas["sabonete_nov"]])
+    assert _erro(capsys).splitlines()[-1] == f"2 vendas exportadas para {destino}."
 
-    def __init__(self, corpo, tipo):
-        super().__init__(corpo)
-        self.headers = {"Content-Type": tipo}
 
-    def __enter__(self):
-        return self
+def test_substituir_sem_arquivo_nao_muda_a_saida_padrao(com_token, vendas, capsys):
+    assert cli.main(["exportar", "--categoria", "Limpeza", "--substituir"]) == cli.SAIDA_SUCESSO
+    assert _erro(capsys).splitlines()[-1] == "0 vendas exportadas para a saída padrão."
 
-    def __exit__(self, *_args):
-        self.close()
+
+@pytest.mark.parametrize(
+    "caminho, argv_extra, motivo",
+    [
+        ("nao-existe/vendas.csv", [], "a pasta não existe"),
+        ("somente-leitura/vendas.csv", [], "sem permissão de escrita"),
+        (".", [], "o caminho é uma pasta"),  # sem --substituir, o "xb" numa pasta lança FileExistsError
+        (".", ["--substituir"], "o caminho é uma pasta"),  # com --substituir, IsADirectoryError
+    ],
+)
+def test_exportar_falha_ao_gravar_mostra_o_motivo_em_portugues(
+    com_token, vendas, tmp_path, capsys, caminho, argv_extra, motivo
+):
+    (tmp_path / "somente-leitura").mkdir(mode=0o555)
+    destino = tmp_path / caminho
+    assert cli.main(["exportar", "--arquivo", str(destino), *argv_extra]) == cli.SAIDA_ERRO
+    assert _erro(capsys).splitlines()[-1] == f"Erro: não foi possível gravar {destino} ({motivo})."
+
+
+def test_exportar_disco_cheio_mostra_o_motivo(com_token, vendas, capsys):
+    # /dev/full aceita abrir, mas toda escrita falha com ENOSPC, como um disco cheio.
+    assert cli.main(["exportar", "--arquivo", "/dev/full", "--substituir"]) == cli.SAIDA_ERRO
+    assert _erro(capsys).splitlines()[-1] == "Erro: não foi possível gravar /dev/full (sem espaço em disco)."
+
+
+def test_motivo_da_falha_usa_o_do_sistema_nos_demais_casos():
+    assert cli.motivo_da_falha(OSError(errno.EIO, "Input/output error")) == "Input/output error"
+    assert cli.motivo_da_falha(OSError("falha sem código")) == "falha sem código"
+
+
+class _SaidaQuebrada:
+    """stdout cujos bytes (`buffer.write`) falham com `erro`, como um pipe fechado ou um disco cheio.
+
+    O texto continua indo para o stdout capturado, porque a API de teste roda no mesmo processo e
+    escreve os logs com `print`.
+    """
+
+    def __init__(self, erro, fileno=None):
+        self._original = sys.stdout
+        self._erro = erro
+        self._fileno = fileno
+        self.buffer = self
+
+    def write(self, dados):
+        if isinstance(dados, str):
+            return self._original.write(dados)
+        raise self._erro
+
+    def flush(self):
+        self._original.flush()
+
+    def fileno(self):
+        if self._fileno is None:
+            raise io.UnsupportedOperation("fileno")
+        return self._fileno
+
+
+def test_exportar_pipe_fechado_sai_em_silencio(com_token, vendas, monkeypatch, capsys):
+    # Ex.: `docker compose run --rm -T cli exportar | head -1`: quem lia fechou o pipe antes do fim.
+    monkeypatch.setattr(sys, "stdout", _SaidaQuebrada(BrokenPipeError(errno.EPIPE, "Broken pipe")))
+    assert cli.main(["exportar"]) == cli.SAIDA_ERRO
+    assert _erro(capsys) == ""
+
+
+def test_exportar_pipe_fechado_redireciona_o_stdout_para_dev_null(com_token, vendas, monkeypatch, tmp_path, capsys):
+    with open(tmp_path / "saida", "wb") as saida:
+        quebrada = _SaidaQuebrada(BrokenPipeError(errno.EPIPE, "Broken pipe"), fileno=saida.fileno())
+        monkeypatch.setattr(sys, "stdout", quebrada)
+        assert cli.main(["exportar"]) == cli.SAIDA_ERRO
+        saida.write(b"descartado")  # o descritor agora aponta para o /dev/null
+    assert (tmp_path / "saida").read_bytes() == b""
+
+
+class _SaidaEmPedacos(_SaidaQuebrada):
+    """stdout cru (como com PYTHONUNBUFFERED) que grava no máximo `tamanho` bytes por chamada e,
+    depois de `chamadas` chamadas, falha com `erro` (o leitor fechou o pipe no meio)."""
+
+    def __init__(self, tamanho, chamadas=None, erro=None):
+        super().__init__(erro)
+        self.recebido = bytearray()
+        self._tamanho = tamanho
+        self._chamadas = chamadas
+
+    def write(self, dados):
+        if isinstance(dados, str):
+            return self._original.write(dados)
+        if self._chamadas == 0:
+            raise self._erro
+        if self._chamadas is not None:
+            self._chamadas -= 1
+        pedaco = bytes(dados[: self._tamanho])
+        self.recebido += pedaco
+        return len(pedaco)
+
+
+def test_exportar_completa_a_escrita_parcial_na_saida_padrao(com_token, cliente_http, cabecalho_web, vendas, monkeypatch, capsys):
+    web = _exportar(cliente_http, cabecalho_web, rota="/api/web/records/export").get_data()
+    saida = _SaidaEmPedacos(tamanho=100)
+    monkeypatch.setattr(sys, "stdout", saida)
+    assert cli.main(["exportar"]) == cli.SAIDA_SUCESSO
+    assert bytes(saida.recebido) == web  # todos os bytes, em pedaços de 100
+
+
+def test_exportar_pipe_fechado_no_meio_nao_informa_sucesso(com_token, vendas, monkeypatch, capsys):
+    saida = _SaidaEmPedacos(tamanho=100, chamadas=2, erro=BrokenPipeError(errno.EPIPE, "Broken pipe"))
+    monkeypatch.setattr(sys, "stdout", saida)
+    assert cli.main(["exportar"]) == cli.SAIDA_ERRO
+    assert len(saida.recebido) == 200 and "exportadas" not in _erro(capsys)
+
+
+def test_exportar_disco_cheio_na_saida_padrao_mostra_o_erro(com_token, vendas, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "stdout", _SaidaQuebrada(OSError(errno.ENOSPC, "No space left on device")))
+    assert cli.main(["exportar"]) == cli.SAIDA_ERRO
+    assert _erro(capsys).splitlines()[-1] == (
+        "Erro: não foi possível escrever o CSV na saída padrão (sem espaço em disco)."
+    )
 
 
 @pytest.mark.parametrize(
@@ -451,7 +572,7 @@ class _RespostaFixa(io.BytesIO):
 )
 def test_exportar_resposta_que_nao_e_o_csv_esperado(monkeypatch, tmp_path, capsys, corpo, tipo, mensagem):
     monkeypatch.setenv("TOKEN_CLI", "token")
-    monkeypatch.setattr(cli, "abrir_url", lambda _requisicao: _RespostaFixa(corpo, tipo))
+    monkeypatch.setattr(cli, "abrir_url", lambda _requisicao: RespostaFixa(corpo, tipo))
     destino = tmp_path / "vendas.csv"
     assert cli.main(["exportar", "-a", str(destino)]) == cli.SAIDA_ERRO
     assert mensagem in capsys.readouterr().err and not destino.exists()
@@ -462,7 +583,7 @@ def test_exportar_pede_csv_a_api(monkeypatch, capsys):
 
     def responder(requisicao):
         recebidas.append((requisicao.full_url, requisicao.get_header("Accept")))
-        return _RespostaFixa("﻿Nº;Data\r\n".encode(), "text/csv; charset=utf-8")
+        return RespostaFixa("﻿Nº;Data\r\n".encode(), "text/csv; charset=utf-8")
 
     monkeypatch.setenv("TOKEN_CLI", "token")
     monkeypatch.setattr(cli, "abrir_url", responder)
@@ -481,6 +602,8 @@ def test_ajuda_lista_exportar_e_as_opcoes(capsys):
     ajuda = capsys.readouterr().out
     assert all(
         opcao in ajuda
-        for opcao in ("--produto", "--categoria", "--data-inicio", "--data-fim", "--ordenar", "--direcao", "--arquivo")
+        for opcao in (
+            "--produto", "--categoria", "--data-inicio", "--data-fim", "--ordenar", "--direcao", "--arquivo", "--substituir"
+        )
     )
     assert "--pagina" not in ajuda and "--tamanho" not in ajuda

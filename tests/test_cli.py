@@ -16,7 +16,7 @@ import pytest
 import api
 import cli
 import db
-from conftest import NOME_TESTE, SENHA_TESTE, USUARIO_TESTE, eventos_do_log
+from conftest import NOME_TESTE, SENHA_TESTE, USUARIO_TESTE, RespostaFixa, eventos_do_log
 
 
 def _token_cli(cliente_http):
@@ -369,22 +369,8 @@ def test_cabecalho_recusado_nao_expoe_o_token(monkeypatch, capsys):
     assert "token-secreto" not in str(erro.value)
 
 
-class _RespostaFixa(io.BytesIO):
-    """Resposta HTTP 200 com o corpo e o Content-Type dados, usável no `with` como a de `urlopen`."""
-
-    def __init__(self, corpo, tipo="application/json"):
-        super().__init__(corpo)
-        self.headers = {"Content-Type": tipo}
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args):
-        self.close()
-
-
 def test_resposta_de_sucesso_sem_json(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "abrir_url", lambda _requisicao: _RespostaFixa(b"<html>"))
+    monkeypatch.setattr(cli, "abrir_url", lambda _requisicao: RespostaFixa(b"<html>"))
     assert cli.main(["saude"]) == cli.SAIDA_ERRO
     assert "(a resposta não é JSON)" in capsys.readouterr().err
 
@@ -393,7 +379,7 @@ def test_resposta_de_sucesso_sem_json(monkeypatch, capsys):
 @pytest.mark.parametrize("corpo", [b"[]", b'"ok"', b"null", b"1"])
 def test_resposta_json_que_nao_e_objeto(monkeypatch, capsys, comando, corpo):
     monkeypatch.setenv("SENHA_CLI", SENHA_TESTE)
-    monkeypatch.setattr(cli, "abrir_url", lambda _requisicao: _RespostaFixa(corpo))
+    monkeypatch.setattr(cli, "abrir_url", lambda _requisicao: RespostaFixa(corpo))
     assert cli.main(comando) == cli.SAIDA_ERRO
     assert "(a resposta não é um objeto JSON)" in capsys.readouterr().err
 

@@ -17,6 +17,7 @@ Execução (via Docker Compose, sem instalar nada no host):
 
 import argparse
 import csv
+import errno
 import getpass
 import http.client
 import io
@@ -32,8 +33,8 @@ URL_API_PADRAO = "http://api:8000"
 TEMPO_LIMITE = 10  # segundos
 VARIAVEL_TOKEN = "TOKEN_CLI"
 
-# Códigos de saída: 0 sucesso, 1 erro da API ou de conexão ou operação cancelada, 2 uso incorreto (argparse),
-# 3 não autenticado.
+# Códigos de saída: 0 sucesso, 1 erro da API ou de conexão, resposta inesperada, operação cancelada ou falha ao
+# gravar o CSV exportado, 2 uso incorreto (argparse), 3 não autenticado.
 SAIDA_SUCESSO = 0
 SAIDA_ERRO = 1
 SAIDA_NAO_AUTENTICADO = 3
@@ -425,20 +426,73 @@ def comando_exportar(argumentos):
     total = contar_vendas_do_csv(conteudo)
     # Só grava depois da resposta completa e válida: um erro da API nunca deixa um arquivo vazio ou cortado.
     if argumentos.arquivo:
-        try:
-            with open(argumentos.arquivo, "wb") as arquivo:
-                arquivo.write(conteudo)
-        except OSError as erro:
-            print(f"Erro: não foi possível gravar {argumentos.arquivo} ({erro.strerror or erro}).", file=sys.stderr)
+        if not _gravar_arquivo(argumentos.arquivo, conteudo, argumentos.substituir):
             return SAIDA_ERRO
         destino = argumentos.arquivo
     else:
-        sys.stdout.flush()
-        sys.stdout.buffer.write(conteudo)  # bytes da API, sem mudar o BOM nem o CRLF
-        sys.stdout.buffer.flush()
+        if not _escrever_na_saida_padrao(conteudo):
+            return SAIDA_ERRO
         destino = "a saída padrão"
     print(f"{_quantidade(total, 'venda exportada', 'vendas exportadas')} para {destino}.", file=sys.stderr)
     return SAIDA_SUCESSO
+
+
+def motivo_da_falha(erro):
+    """Motivo de uma falha de escrita, em português (o `strerror` do sistema vem em inglês)."""
+    if isinstance(erro, FileNotFoundError):
+        return "a pasta não existe"
+    if isinstance(erro, PermissionError):
+        return "sem permissão de escrita"
+    if isinstance(erro, IsADirectoryError):
+        return "o caminho é uma pasta"
+    if erro.errno == errno.ENOSPC:
+        return "sem espaço em disco"
+    return erro.strerror or str(erro)
+
+
+def _gravar_arquivo(caminho, conteudo, substituir):
+    """Grava o CSV em `caminho`. Sem `substituir`, recusa um arquivo que já existe. Retorna False se falhar."""
+    try:
+        # "xb" só cria: o Python lança FileExistsError se o arquivo já existir, sem apagá-lo.
+        with open(caminho, "wb" if substituir else "xb") as arquivo:
+            arquivo.write(conteudo)
+    except FileExistsError:
+        if os.path.isdir(caminho):
+            print(f"Erro: não foi possível gravar {caminho} (o caminho é uma pasta).", file=sys.stderr)
+        else:
+            print(f"Erro: {caminho} já existe; use --substituir para sobrescrever.", file=sys.stderr)
+        return False
+    except OSError as erro:
+        print(f"Erro: não foi possível gravar {caminho} ({motivo_da_falha(erro)}).", file=sys.stderr)
+        return False
+    return True
+
+
+def _escrever_na_saida_padrao(conteudo):
+    """Escreve os bytes da API no stdout, sem mudar o BOM nem o CRLF. Retorna False se falhar."""
+    try:
+        sys.stdout.flush()
+        restante = memoryview(conteudo)
+        # Com PYTHONUNBUFFERED (como no contêiner), o buffer é o arquivo cru, que pode gravar só parte dos
+        # bytes num pipe: repete até gravar tudo, e um pipe fechado no meio lança BrokenPipeError.
+        while restante:
+            restante = restante[sys.stdout.buffer.write(restante) :]
+        sys.stdout.buffer.flush()
+    except BrokenPipeError:
+        # Quem lia a saída fechou antes do fim (ex.: `| head -1`): sai em silêncio. O stdout passa a
+        # apontar para /dev/null para o Python não reclamar do pipe fechado ao terminar.
+        try:
+            descritor = sys.stdout.fileno()
+            descartar = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(descartar, descritor)
+            os.close(descartar)
+        except (OSError, ValueError):
+            pass  # stdout sem descritor de arquivo (ex.: capturado): não há o que redirecionar
+        return False
+    except OSError as erro:
+        print(f"Erro: não foi possível escrever o CSV na saída padrão ({motivo_da_falha(erro)}).", file=sys.stderr)
+        return False
+    return True
 
 
 def comando_excluir(argumentos):
@@ -612,7 +666,11 @@ def criar_parser():
     _adicionar_opcoes_ordenacao(exportar)
     exportar.add_argument(
         "-a", "--arquivo", metavar="CAMINHO",
-        help="grava o CSV neste arquivo em vez da saída padrão (no contêiner: use um volume montado)",
+        help="grava o CSV neste arquivo em vez da saída padrão (no contêiner: use um volume montado); "
+        "recusa um arquivo que já existe",
+    )
+    exportar.add_argument(
+        "--substituir", action="store_true", help="com --arquivo, sobrescreve o arquivo se ele já existir"
     )
     exportar.set_defaults(funcao=comando_exportar)
 

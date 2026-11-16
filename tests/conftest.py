@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import sys
@@ -15,6 +16,23 @@ import db  # noqa: E402
 USUARIO_TESTE = "testador"
 SENHA_TESTE = "senha-de-teste"
 NOME_TESTE = "Pessoa de Teste"
+
+
+class RespostaFixa(io.BytesIO):
+    """Resposta HTTP 200 com o corpo e o Content-Type dados, usável no `with` como a de `urlopen`.
+
+    Dublê de `cli.abrir_url` nos testes da CLI que precisam de uma resposta que a API real não dá.
+    """
+
+    def __init__(self, corpo, tipo="application/json"):
+        super().__init__(corpo)
+        self.headers = {"Content-Type": tipo}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        self.close()
 
 
 def eventos_do_log(capsys):

@@ -403,9 +403,9 @@ O `cli` não tem build próprio: usa a mesma imagem do serviço `api` (`<projeto
 | `login [--usuario U]` | `POST /api/cli/token` | usuário e senha | Obtém um token de acesso |
 | `sessao` | `GET /api/cli/sessao` | Bearer (`TOKEN_CLI`) | Mostra o usuário dono do token |
 
-Códigos de saída: `0` sucesso, `1` erro da API, API fora do ar ou operação cancelada (ex.: exclusão não confirmada), `2` uso incorreto (subcomando ou opção inválidos), `3` não autenticado (sem token, token inválido/expirado ou credenciais inválidas).
+Códigos de saída: `0` sucesso, `1` erro da API, API fora do ar ou resposta inesperada, operação cancelada (ex.: exclusão não confirmada) ou falha ao gravar o CSV exportado (ex.: `exportar --arquivo` num arquivo que já existe), `2` uso incorreto (subcomando ou opção inválidos), `3` não autenticado (sem token, token inválido/expirado ou credenciais inválidas).
 
-Erros são mostrados numa linha no stderr, sem traceback: `Erro: <mensagem da API> (HTTP <status>)` quando a API responde com erro, e `Erro: não foi possível conectar à API em <URL_API> (<motivo>)` quando ela está fora do ar ou a resposta não é da API (não é HTTP, não é um objeto JSON, veio cortada).
+Erros são mostrados numa linha no stderr, sem traceback: `Erro: <mensagem da API> (HTTP <status>)` quando a API responde com erro, e `Erro: não foi possível conectar à API em <URL_API> (<motivo>)` quando ela está fora do ar ou a resposta não é da API (não é HTTP, não é um objeto JSON nem o CSV esperado, veio cortada).
 
 ### Obter o token e configurar a variável de ambiente
 
@@ -683,12 +683,13 @@ O comando `exportar` gera um CSV com **todas** as vendas dos filtros, sem limite
 
 | Subcomando | Rota | O que faz |
 |---|---|---|
-| `exportar [--produto ID] [--categoria NOME] [--data-inicio AAAA-MM-DD] [--data-fim AAAA-MM-DD] [--ordenar CAMPO] [--direcao asc\|desc] [--arquivo CAMINHO]` | `GET /api/cli/records/export` | Exporta as vendas dos filtros em CSV |
+| `exportar [--produto ID] [--categoria NOME] [--data-inicio AAAA-MM-DD] [--data-fim AAAA-MM-DD] [--ordenar CAMPO] [--direcao asc\|desc] [--arquivo CAMINHO [--substituir]]` | `GET /api/cli/records/export` | Exporta as vendas dos filtros em CSV |
 
 - **Filtros**: `--produto`, `--categoria`, `--data-inicio` e `--data-fim`, combinados com **E** e com as mesmas regras do `buscar` (veja a tabela "Filtros disponíveis" da #10). Filtro omitido ou vazio não restringe.
 - **Ordenação**: `--ordenar` e `--direcao`, com as mesmas colunas e os mesmos padrões do `listar` (#9): data mais recente primeiro, com o número da venda desempatando.
 - **Sem paginação**: não há `--pagina` nem `--tamanho`; o arquivo sempre traz todos os resultados.
 - **Destino**: sem `--arquivo` (`-a`), o CSV vai para a saída padrão; com `--arquivo`, é gravado no caminho dado, **dentro do contêiner**. O resumo ("N vendas exportadas para …") e os erros vão para o stderr, então nunca se misturam ao CSV.
+- **Arquivo existente**: `--arquivo` nunca sobrescreve um arquivo sem pedir. Se ele já existir, o comando falha (código `1`) sem tocar nele: "Erro: vendas.csv já existe; use --substituir para sobrescrever.". Com `--substituir`, o arquivo é sobrescrito.
 
 ### Como acessar o arquivo gerado
 
@@ -704,7 +705,7 @@ ls -l vendas.csv     # o arquivo está na pasta atual do host
 
 Se a API recusar algum parâmetro, o erro aparece no terminal e o código de saída é diferente de `0`, mas o shell já criou `vendas.csv` vazio. Para não sobrar um arquivo vazio, grave num arquivo temporário e só renomeie no sucesso: `docker compose run --rm -T cli exportar > tmp.csv && mv tmp.csv vendas.csv`.
 
-**2. Volume montado.** Monte uma pasta do host no contêiner e use `--arquivo` com um caminho dentro dela. O `--user` faz o arquivo pertencer ao seu usuário do host. Com `--arquivo`, a CLI só grava depois de receber o CSV completo: um erro não cria nem altera o arquivo.
+**2. Volume montado.** Monte uma pasta do host no contêiner e use `--arquivo` com um caminho dentro dela. O `--user` faz o arquivo pertencer ao seu usuário do host. Com `--arquivo`, a CLI só grava depois de receber o CSV completo: um erro da API não cria nem altera o arquivo. Para gerar de novo um arquivo que já existe, acrescente `--substituir`.
 
 ```bash
 docker compose run --rm -v "$PWD:/saida" --user "$(id -u):$(id -g)" cli exportar --arquivo /saida/vendas.csv
@@ -746,7 +747,9 @@ Erro: Parâmetros inválidos. (HTTP 400)
   --produto: O produto deve ser o número de um produto do catálogo.
 ```
 
-Códigos de saída: `0` sucesso (mesmo sem vendas encontradas); `1` erro da API (filtro ou parâmetro inválido), API fora do ar, resposta que não é o CSV esperado ou falha ao gravar o `--arquivo`; `2` uso incorreto (ex.: `--ordenar preco`); `3` sem token ou token inválido.
+Falhas ao gravar mostram o motivo em português: a pasta não existe, sem permissão de escrita, o caminho é uma pasta ou sem espaço em disco (ex.: `Erro: não foi possível gravar /saida/x/vendas.csv (a pasta não existe).`). Se quem lê a saída padrão fecha o pipe antes do fim (ex.: `exportar | head -1`), o comando para em silêncio, sem traceback.
+
+Códigos de saída: `0` sucesso (mesmo sem vendas encontradas); `1` erro da API (filtro ou parâmetro inválido), API fora do ar, resposta que não é o CSV esperado, `--arquivo` que já existe (sem `--substituir`), falha ao gravar o arquivo ou a saída padrão, ou pipe fechado antes do fim; `2` uso incorreto (ex.: `--ordenar preco`); `3` sem token ou token inválido.
 
 ### Endpoint desta issue
 
