@@ -510,6 +510,12 @@ CONDICOES_BUSCA_CLI = {
 CAMPOS_BUSCA_CLI = tuple(CONDICOES_BUSCA_CLI)
 
 
+def _onde_busca_cli(filtros):
+    """Monta o WHERE da busca e da exportação da CLI com as condições dos filtros informados (vazio se não houver)."""
+    condicoes = [sql.SQL(CONDICOES_BUSCA_CLI[campo]) for campo in CAMPOS_BUSCA_CLI if campo in filtros]
+    return sql.SQL("WHERE ") + sql.SQL(" AND ").join(condicoes) if condicoes else sql.SQL("")
+
+
 def buscar_vendas_cli(filtros, pagina, tamanho, ordenar, direcao, request_id):
     """Retorna (vendas da página, total de vendas encontradas) para o comando `buscar` da CLI.
 
@@ -517,8 +523,7 @@ def buscar_vendas_cli(filtros, pagina, tamanho, ordenar, direcao, request_id):
     `tamanho` é o número de vendas por página. `ordenar` deve ser uma chave de COLUNAS_ORDENACAO_CLI
     e `direcao`, "asc" ou "desc". O id desempata a ordenação, para a paginação ser estável.
     """
-    condicoes = [sql.SQL(CONDICOES_BUSCA_CLI[campo]) for campo in CAMPOS_BUSCA_CLI if campo in filtros]
-    onde = sql.SQL("WHERE ") + sql.SQL(" AND ").join(condicoes) if condicoes else sql.SQL("")
+    onde = _onde_busca_cli(filtros)
     sentido = sql.SQL("DESC" if direcao == "desc" else "ASC")
     contagem = sql.SQL(
         "SELECT COUNT(*) AS total FROM venda JOIN produto ON produto.id = venda.produto_id {onde}"
@@ -553,6 +558,46 @@ def buscar_vendas_cli(filtros, pagina, tamanho, ordenar, direcao, request_id):
         f"Página {pagina}: {len(linhas)} de {total} vendas ({', '.join(sorted(filtros)) or 'sem filtros'})",
     )
     return linhas, total
+
+
+# Exportação CSV pela CLI (#11). Consulta própria da CLI: os mesmos filtros da busca da CLI (#10),
+# sem LIMIT/OFFSET, para o arquivo trazer todas as vendas dos filtros, e não só uma página.
+def exportar_vendas_cli(filtros, ordenar, direcao, request_id):
+    """Retorna todas as vendas que atendem aos filtros, sem paginação, para o comando `exportar` da CLI.
+
+    `filtros` pode ter as chaves de CONDICOES_BUSCA_CLI; os ausentes não restringem (sem filtros,
+    retorna todas as vendas). `ordenar` deve ser uma chave de COLUNAS_ORDENACAO_CLI e `direcao`,
+    "asc" ou "desc", com o id desempatando.
+    """
+    consulta = sql.SQL(
+        """
+        SELECT venda.id, venda.data_venda, produto.nome AS produto_nome, produto.categoria,
+               venda.quantidade, venda.valor_unitario, venda.valor_total
+        FROM venda JOIN produto ON produto.id = venda.produto_id
+        {onde}
+        ORDER BY {coluna} {sentido}, venda.id {sentido}
+        """
+    ).format(
+        onde=_onde_busca_cli(filtros),
+        coluna=sql.SQL(COLUNAS_ORDENACAO_CLI[ordenar]),
+        sentido=sql.SQL("DESC" if direcao == "desc" else "ASC"),
+    )
+    try:
+        with obter_conexao() as conexao:
+            conexao.read_only = True
+            linhas = conexao.execute(consulta, filtros).fetchall()
+    except psycopg.Error:
+        registrar_log("ERROR", "cli", "exportar_vendas", "error", request_id, "Falha ao exportar vendas")
+        raise
+    registrar_log(
+        "INFO",
+        "cli",
+        "exportar_vendas",
+        "success",
+        request_id,
+        f"{len(linhas)} vendas lidas para exportação ({', '.join(sorted(filtros)) or 'sem filtros'})",
+    )
+    return linhas
 
 
 # Indicadores do dashboard da Web (#6). Consultas próprias, lidas no mesmo snapshot.

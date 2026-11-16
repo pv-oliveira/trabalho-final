@@ -655,10 +655,15 @@ def web_exportar_vendas():
         linhas = db.exportar_vendas_web(filtros, ordenar, direcao, g.request_id)
     except psycopg.Error:
         return resposta_falha_no_banco("exportar_vendas")
+    return resposta_csv(linhas, "web", filtros)
+
+
+def resposta_csv(linhas, origem, filtros):
+    """Resposta 200 com o CSV das vendas, para a exportação da Web e da CLI, com o log da camada `api`."""
     nome_arquivo = f"vendas-{datetime.now(fuso_horario()):%Y%m%d-%H%M%S}.csv"
     registrar_log(
         "INFO",
-        "web",
+        origem,
         "exportar_vendas",
         "success",
         f"{len(linhas)} vendas exportadas em {nome_arquivo} ({', '.join(sorted(filtros)) or 'sem filtros'})",
@@ -787,6 +792,26 @@ def cli_buscar_vendas():
         f"Busca ({', '.join(sorted(filtros)) or 'sem filtros'}): {total} vendas, página {pagina} de {corpo['total_paginas']}",
     )
     return jsonify(corpo), 200
+
+
+@app.get("/api/cli/records/export")
+@exigir_autenticacao_cli("exportar_vendas")
+def cli_exportar_vendas():
+    """Exportação CSV da CLI: os filtros da busca (#10) e a ordenação da listagem (#9), sem paginação.
+
+    O arquivo tem o mesmo formato do CSV da Web (#5); a consulta é a própria da CLI.
+    """
+    erros = {}
+    filtros = ler_filtros_busca(erros)
+    ordenar, direcao = ler_ordenacao(erros, db.COLUNAS_ORDENACAO_CLI)
+    if erros:
+        return resposta_parametros_invalidos("exportar_vendas", erros)
+
+    try:
+        linhas = db.exportar_vendas_cli(filtros, ordenar, direcao, g.request_id)
+    except psycopg.Error:
+        return resposta_falha_no_banco("exportar_vendas")
+    return resposta_csv(linhas, "cli", filtros)
 
 
 @app.delete("/api/cli/records/<id_venda>")
