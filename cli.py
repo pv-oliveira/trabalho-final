@@ -11,6 +11,7 @@ Execução (via Docker Compose, sem instalar nada no host):
     TOKEN_CLI=<token> docker compose run --rm cli editar 7 --produto 1 --quantidade 5 --valor-unitario 25.50 --data 2026-10-15
     TOKEN_CLI=<token> docker compose run --rm cli listar --pagina 2 --tamanho 10 --ordenar valor_total --direcao asc
     TOKEN_CLI=<token> docker compose run --rm cli excluir 7
+    TOKEN_CLI=<token> docker compose run --rm cli buscar --categoria Bebidas --data-inicio 2026-10-01 --data-fim 2026-10-31
 """
 
 import argparse
@@ -48,6 +49,14 @@ OPCOES_LISTAGEM = {
     "tamanho": "--tamanho",
     "ordenar": "--ordenar",
     "direcao": "--direcao",
+}
+
+# Filtros da busca na API -> opção da CLI, para montar a query string e mostrar cada erro do 400 junto da opção.
+OPCOES_BUSCA = {
+    "produto_id": "--produto",
+    "categoria": "--categoria",
+    "data_inicio": "--data-inicio",
+    "data_fim": "--data-fim",
 }
 
 # Colunas aceitas em --ordenar (as mesmas chaves que a API aceita em /api/cli/records).
@@ -297,9 +306,9 @@ def _tabela_de_vendas(vendas):
     return [formatar(cabecalho), *(formatar(linha) for linha in linhas)]
 
 
-def comando_listar(argumentos):
-    """Comando protegido: GET /api/cli/records, com página, tamanho e ordenação na query string."""
-    parametros = {
+def _parametros_de_pagina(argumentos):
+    """Página, tamanho e ordenação informados em `listar` e `buscar` (os omitidos ficam com o padrão da API)."""
+    return {
         campo: valor
         for campo, valor in (
             ("pagina", argumentos.pagina),
@@ -309,20 +318,66 @@ def comando_listar(argumentos):
         )
         if valor is not None
     }
-    caminho = "/records" + (f"?{urllib.parse.urlencode(parametros)}" if parametros else "")
-    corpo = requisitar("GET", caminho, token=token_do_ambiente())
+
+
+def _mostrar_pagina(corpo, sem_vendas, vendas):
+    """Imprime a tabela da página e o rodapé de `listar` e `buscar`.
+
+    `sem_vendas` é a mensagem quando não há nenhuma venda; `vendas` é o rótulo do total no rodapé.
+    """
     if corpo["vendas"]:
         print("\n".join(_tabela_de_vendas(corpo["vendas"])))
     elif corpo["total"] == 0:
-        print("Nenhuma venda cadastrada.")
+        print(sem_vendas)
     else:
         print(f"A página {corpo['pagina']} não existe: há {_quantidade(corpo['total_paginas'], 'página', 'páginas')}.")
-        return SAIDA_SUCESSO
+        return
     sentido = "crescente" if corpo["direcao"] == "asc" else "decrescente"
     print(
-        f"Página {corpo['pagina']} de {corpo['total_paginas']} · {_quantidade(corpo['total'], 'venda', 'vendas')} · "
+        f"Página {corpo['pagina']} de {corpo['total_paginas']} · {_quantidade(corpo['total'], *vendas)} · "
         f"{corpo['itens_por_pagina']} por página · ordenado por {corpo['ordenar']} ({sentido})"
     )
+
+
+def comando_listar(argumentos):
+    """Comando protegido: GET /api/cli/records, com página, tamanho e ordenação na query string."""
+    parametros = _parametros_de_pagina(argumentos)
+    caminho = "/records" + (f"?{urllib.parse.urlencode(parametros)}" if parametros else "")
+    corpo = requisitar("GET", caminho, token=token_do_ambiente())
+    _mostrar_pagina(corpo, "Nenhuma venda cadastrada.", ("venda", "vendas"))
+    return SAIDA_SUCESSO
+
+
+def descrever_filtros(filtros):
+    """Filtros aplicados pela API, em texto: "produto 1, categoria Bebidas, de 01/10/2026 até 31/10/2026"."""
+    partes = []
+    if filtros.get("produto_id") is not None:
+        partes.append(f"produto {filtros['produto_id']}")
+    if filtros.get("categoria") is not None:
+        partes.append(f"categoria {filtros['categoria']}")
+    inicio, fim = filtros.get("data_inicio"), filtros.get("data_fim")
+    if inicio is not None and fim is not None:
+        partes.append(f"de {data_brasileira(inicio)} até {data_brasileira(fim)}")
+    elif inicio is not None:
+        partes.append(f"a partir de {data_brasileira(inicio)}")
+    elif fim is not None:
+        partes.append(f"até {data_brasileira(fim)}")
+    return ", ".join(partes) or "nenhum (todas as vendas)"
+
+
+def comando_buscar(argumentos):
+    """Comando protegido: GET /api/cli/records/search, com os filtros, a página e a ordenação na query string.
+
+    Os filtros são os mesmos da busca da Web (#4) e são combinados com E; quem valida é a API.
+    """
+    parametros = {
+        campo: getattr(argumentos, campo) for campo in OPCOES_BUSCA if getattr(argumentos, campo) is not None
+    }
+    parametros.update(_parametros_de_pagina(argumentos))
+    caminho = "/records/search" + (f"?{urllib.parse.urlencode(parametros)}" if parametros else "")
+    corpo = requisitar("GET", caminho, token=token_do_ambiente())
+    print(f"Filtros: {descrever_filtros(corpo['filtros'])}")
+    _mostrar_pagina(corpo, "Nenhuma venda encontrada com esses filtros.", ("venda encontrada", "vendas encontradas"))
     return SAIDA_SUCESSO
 
 
@@ -356,6 +411,19 @@ def _adicionar_campos_venda(parser):
         help="em reais, com vírgula ou ponto decimal (ex.: 25,50); até 100000,00",
     )
     obrigatorias.add_argument("--data", required=True, metavar="AAAA-MM-DD", help="data da venda, que não pode ser futura")
+
+
+def _adicionar_opcoes_pagina(parser):
+    """Opções de página e ordenação de `listar` e `buscar`, com os mesmos padrões da API."""
+    parser.add_argument("--pagina", metavar="N", help="número da página (padrão: 1)")
+    parser.add_argument("--tamanho", metavar="N", help="vendas por página, de 1 a 100 (padrão: 10)")
+    parser.add_argument(
+        "--ordenar", choices=COLUNAS_ORDENACAO, metavar="CAMPO",
+        help=f"campo da ordenação: {', '.join(COLUNAS_ORDENACAO)} (padrão: data_venda)",
+    )
+    parser.add_argument(
+        "--direcao", choices=("asc", "desc"), help="asc (crescente) ou desc (decrescente) (padrão: desc)"
+    )
 
 
 def _traduzir_ajuda(parser):
@@ -432,17 +500,33 @@ def criar_parser():
         help="lista as vendas com paginação e ordenação (protegido)",
         description="Lista as vendas, uma página por vez, na ordem escolhida.",
     )
-    _traduzir_ajuda(listar)
-    listar.add_argument("--pagina", metavar="N", help="número da página (padrão: 1)")
-    listar.add_argument("--tamanho", metavar="N", help="vendas por página, de 1 a 100 (padrão: 10)")
-    listar.add_argument(
-        "--ordenar", choices=COLUNAS_ORDENACAO, metavar="CAMPO",
-        help=f"campo da ordenação: {', '.join(COLUNAS_ORDENACAO)} (padrão: data_venda)",
-    )
-    listar.add_argument(
-        "--direcao", choices=("asc", "desc"), help="asc (crescente) ou desc (decrescente) (padrão: desc)"
-    )
+    _adicionar_opcoes_pagina(_traduzir_ajuda(listar))
     listar.set_defaults(funcao=comando_listar)
+
+    buscar = subcomandos.add_parser(
+        "buscar",
+        help="busca vendas com filtros combináveis (protegido)",
+        description=(
+            "Busca vendas com os mesmos filtros da busca da Web, combinados com E: a venda precisa "
+            "atender a todos os filtros informados. Sem filtros, mostra todas as vendas."
+        ),
+    )
+    _traduzir_ajuda(buscar)
+    filtros = buscar.add_argument_group("filtros (opcionais, combinados com E)")
+    filtros.add_argument(
+        "--produto", dest="produto_id", metavar="ID", help="id do produto (veja o comando 'produtos')"
+    )
+    filtros.add_argument(
+        "--categoria",
+        metavar="NOME",
+        help="nome exato da categoria, com a inicial maiúscula (ex.: Alimentos, Bebidas, Higiene, Limpeza)",
+    )
+    filtros.add_argument("--data-inicio", metavar="AAAA-MM-DD", help="vendas a partir desta data, inclusive")
+    filtros.add_argument(
+        "--data-fim", metavar="AAAA-MM-DD", help="vendas até esta data, inclusive (não pode ser anterior à inicial)"
+    )
+    _adicionar_opcoes_pagina(buscar)
+    buscar.set_defaults(funcao=comando_buscar)
 
     excluir = subcomandos.add_parser(
         "excluir",
@@ -473,7 +557,7 @@ def main(argv=None):
     except ErroDaApi as erro:
         print(f"Erro: {erro.mensagem} (HTTP {erro.status})", file=sys.stderr)
         for campo, mensagem in erro.campos.items():
-            opcao = OPCOES_VENDA.get(campo) or OPCOES_LISTAGEM.get(campo, campo)
+            opcao = OPCOES_VENDA.get(campo) or OPCOES_BUSCA.get(campo) or OPCOES_LISTAGEM.get(campo, campo)
             print(f"  {opcao}: {mensagem}", file=sys.stderr)
         if erro.status == 401 and argumentos.comando != "login":
             print(f"Token ausente, inválido ou expirado. Gere outro com 'login' e atualize {VARIAVEL_TOKEN}.", file=sys.stderr)
