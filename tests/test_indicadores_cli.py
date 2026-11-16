@@ -1,6 +1,9 @@
 """Testes dos indicadores pela CLI (issue #12): rota /api/cli/dashboard, banco e comando `indicadores`."""
 
+import errno
+import io
 import json
+import sys
 from datetime import date
 
 import psycopg
@@ -291,9 +294,8 @@ SAIDA_COM_VENDAS = [
 ]
 
 
-@pytest.mark.parametrize("comando", ["indicadores", "dashboard"])
-def test_indicadores_mostra_os_3_indicadores_em_texto(com_token, vendas, capsys, comando):
-    assert cli.main([comando]) == cli.SAIDA_SUCESSO
+def test_indicadores_mostra_os_3_indicadores_em_texto(com_token, vendas, capsys):
+    assert cli.main(["indicadores"]) == cli.SAIDA_SUCESSO
     saida, erro = _saida(capsys)
     assert saida == SAIDA_COM_VENDAS
     assert erro == ""
@@ -325,7 +327,7 @@ def test_indicadores_mostram_os_mesmos_valores_que_a_web_recebe(com_token, clien
     web = cliente_http.get("/api/web/dashboard", headers=cabecalho_web).get_json()
     capsys.readouterr()
     assert cli.main(["indicadores"]) == cli.SAIDA_SUCESSO
-    assert _saida(capsys)[0] == cli.formatar_indicadores(web)
+    assert _saida(capsys)[0] == cli.formatar_indicadores(cli.ler_indicadores(web))
 
 
 def test_indicadores_reflete_venda_criada_pela_cli(com_token, capsys):
@@ -364,45 +366,119 @@ def test_indicadores_api_fora_do_ar(monkeypatch, capsys):
     assert "não foi possível conectar à API" in _saida(capsys)[1]
 
 
+def _corpo_valido():
+    """Resposta mínima válida da rota, para os testes trocarem um campo de cada vez."""
+    return {
+        "resumo": {"total_vendas": 1, "faturamento_total": "1.00"},
+        "faturamento_por_mes": [{"mes": "2026-10", "total": "1.00"}],
+        "faturamento_por_categoria": [{"categoria": "Limpeza", "total": "1.00"}],
+        "top_produtos": [{"produto_id": 7, "produto_nome": "Detergente 500 ml", "quantidade": 1}],
+    }
+
+
+def _com(caminho, valor):
+    """Cópia do corpo válido com `valor` em `caminho` (ex.: ("top_produtos", 0, "quantidade"))."""
+    corpo = _corpo_valido()
+    alvo = corpo
+    for chave in caminho[:-1]:
+        alvo = alvo[chave]
+    if valor is _REMOVER:
+        del alvo[caminho[-1]]
+    else:
+        alvo[caminho[-1]] = valor
+    return corpo
+
+
+_REMOVER = object()
+
+
 @pytest.mark.parametrize(
     "corpo",
     [
-        {},  # sem as chaves
-        {"resumo": {"total_vendas": 1, "faturamento_total": "1.00"}},  # faltam os indicadores
-        {"resumo": [], "faturamento_por_mes": [], "faturamento_por_categoria": [], "top_produtos": []},
-        {
-            "resumo": {"total_vendas": "um", "faturamento_total": "1.00"},  # não é número
-            "faturamento_por_mes": [],
-            "faturamento_por_categoria": [],
-            "top_produtos": [],
-        },
-        {
-            "resumo": {"total_vendas": 1, "faturamento_total": "1.00"},
-            "faturamento_por_mes": [{"mes": "2026-13", "total": "1.00"}],  # mês inexistente
-            "faturamento_por_categoria": [],
-            "top_produtos": [],
-        },
-        {
-            "resumo": {"total_vendas": 1, "faturamento_total": "1.00"},
-            "faturamento_por_mes": [{"mes": "2026-10", "total": "abc"}],  # valor que não é número
-            "faturamento_por_categoria": [],
-            "top_produtos": [],
-        },
-        {
-            "resumo": {"total_vendas": 1, "faturamento_total": "1.00"},
-            "faturamento_por_mes": [{"mes": 202610, "total": "1.00"}],  # mês que não é texto
-            "faturamento_por_categoria": [],
-            "top_produtos": [],
-        },
+        pytest.param({}, id="sem-as-chaves"),
+        pytest.param(_com(("faturamento_por_mes",), _REMOVER), id="sem-um-indicador"),
+        pytest.param(_com(("resumo",), []), id="resumo-nao-e-objeto"),
+        pytest.param(_com(("resumo", "faturamento_total"), _REMOVER), id="resumo-incompleto"),
+        pytest.param(_com(("resumo", "total_vendas"), "um"), id="total-texto"),
+        pytest.param(_com(("resumo", "total_vendas"), True), id="total-bool"),
+        pytest.param(_com(("resumo", "total_vendas"), -1), id="total-negativo"),
+        pytest.param(_com(("resumo", "faturamento_total"), 1.5), id="faturamento-numero"),
+        pytest.param(_com(("faturamento_por_mes",), {}), id="meses-nao-e-lista"),
+        pytest.param(_com(("faturamento_por_mes", 0), "2026-10"), id="mes-nao-e-objeto"),
+        pytest.param(_com(("faturamento_por_mes", 0, "total"), _REMOVER), id="mes-sem-total"),
+        pytest.param(_com(("faturamento_por_mes", 0, "mes"), "2026-00"), id="mes-00"),
+        pytest.param(_com(("faturamento_por_mes", 0, "mes"), "2026-13"), id="mes-13"),
+        pytest.param(_com(("faturamento_por_mes", 0, "mes"), 202610), id="mes-numero"),
+        pytest.param(_com(("faturamento_por_mes", 0, "total"), "abc"), id="valor-texto"),
+        pytest.param(_com(("faturamento_por_mes", 0, "total"), "-1.00"), id="valor-negativo"),
+        pytest.param(_com(("faturamento_por_mes", 0, "total"), "1.5"), id="valor-1-casa"),
+        pytest.param(_com(("faturamento_por_categoria", 0, "categoria"), None), id="categoria-nula"),
+        pytest.param(_com(("top_produtos", 0, "quantidade"), 10.0), id="quantidade-float"),
+        pytest.param(_com(("top_produtos", 0, "quantidade"), True), id="quantidade-bool"),
+        pytest.param(_com(("top_produtos", 0, "produto_nome"), 7), id="nome-numero"),
     ],
 )
-def test_indicadores_resposta_inesperada_nao_imprime_nada_pela_metade(monkeypatch, capsys, corpo):
+def test_indicadores_resposta_inesperada_nao_imprime_nada(monkeypatch, capsys, corpo):
     monkeypatch.setenv("TOKEN_CLI", "qualquer")
     monkeypatch.setattr(cli, "abrir_url", lambda _requisicao: RespostaFixa(json.dumps(corpo).encode()))
     assert cli.main(["indicadores"]) == cli.SAIDA_ERRO
     saida, erro = _saida(capsys)
     assert saida == []
-    assert erro.endswith("(a resposta não tem os indicadores esperados).")
+    # A API respondeu: a mensagem não fala em falha de conexão.
+    assert erro == f"Erro: resposta inesperada da API em {cli.url_api()} (a resposta não tem os indicadores esperados)."
+
+
+def test_corpo_valido_dos_testes_e_aceito(monkeypatch, capsys):
+    monkeypatch.setenv("TOKEN_CLI", "qualquer")
+    monkeypatch.setattr(cli, "abrir_url", lambda _requisicao: RespostaFixa(json.dumps(_corpo_valido()).encode()))
+    assert cli.main(["indicadores"]) == cli.SAIDA_SUCESSO
+    assert _saida(capsys)[0][-1] == "  1. Detergente 500 ml  1 unidade  " + "█" * 30
+
+
+def test_erro_da_propria_cli_ao_formatar_nao_vira_resposta_inesperada(com_token, vendas, monkeypatch):
+    def barra_com_defeito(*_args):
+        raise TypeError("defeito na formatação")
+
+    monkeypatch.setattr(cli, "barra_de_texto", barra_com_defeito)
+    with pytest.raises(TypeError, match="defeito na formatação"):
+        cli.main(["indicadores"])
+
+
+class _SaidaQuebrada:
+    """stdout cujos bytes (`buffer.write`) falham com `erro`, como um pipe fechado ou um disco cheio.
+
+    O texto continua indo para o stdout capturado, porque a API de teste roda no mesmo processo e
+    escreve os logs com `print`.
+    """
+
+    def __init__(self, erro):
+        self._original = sys.stdout
+        self._erro = erro
+        self.buffer = self
+
+    def write(self, dados):
+        if isinstance(dados, str):
+            return self._original.write(dados)
+        raise self._erro
+
+    def flush(self):
+        self._original.flush()
+
+    def fileno(self):
+        raise io.UnsupportedOperation("fileno")
+
+
+def test_indicadores_pipe_fechado_sai_em_silencio(com_token, vendas, monkeypatch, capsys):
+    # Ex.: `docker compose run --rm cli indicadores | head -3`: quem lia fechou o pipe antes do fim.
+    monkeypatch.setattr(sys, "stdout", _SaidaQuebrada(BrokenPipeError(errno.EPIPE, "Broken pipe")))
+    assert cli.main(["indicadores"]) == cli.SAIDA_ERRO
+    assert _saida(capsys)[1] == ""
+
+
+def test_indicadores_falha_ao_escrever_mostra_o_motivo(com_token, vendas, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "stdout", _SaidaQuebrada(OSError(errno.ENOSPC, "No space left on device")))
+    assert cli.main(["indicadores"]) == cli.SAIDA_ERRO
+    assert _saida(capsys)[1] == "Erro: não foi possível escrever os indicadores na saída padrão (sem espaço em disco)."
 
 
 @pytest.mark.parametrize(
@@ -426,12 +502,19 @@ def test_formatos_brasileiros():
     assert cli.mes_brasileiro("2025-12") == "dez/2025"
 
 
+@pytest.mark.parametrize("mes", ["2026-00", "2026-13", "2026-1", "2026-۱۰", "out/2026"])
+def test_mes_brasileiro_recusa_mes_inexistente(mes):
+    with pytest.raises(ValueError):
+        cli.mes_brasileiro(mes)
+
+
 def test_ajuda_lista_o_comando_indicadores(capsys):
     with pytest.raises(SystemExit) as saida:
         cli.main(["--help"])
     assert saida.value.code == 0
     ajuda = capsys.readouterr().out
-    assert "indicadores (dashboard)" in ajuda and "3 indicadores do dashboard da Web" in ajuda
+    assert "indicadores" in ajuda and "3 indicadores do dashboard da Web" in ajuda
+    assert "dashboard)" not in ajuda  # subcomandos só em português (CLAUDE.md)
 
 
 def test_ajuda_do_comando_indicadores(capsys):

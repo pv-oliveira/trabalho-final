@@ -24,6 +24,7 @@ import http.client
 import io
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -68,6 +69,9 @@ OPCOES_BUSCA = {
 MESES_ABREVIADOS = ("jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez")
 LARGURA_BARRA = 30
 BLOCO_BARRA = "█"
+# Formatos que a API usa nos indicadores: mês "2026-10" (01 a 12) e valor em reais "1234.50" (valor_json).
+FORMATO_MES = re.compile(r"[0-9]{4}-(0[1-9]|1[0-2])")
+FORMATO_VALOR = re.compile(r"[0-9]+\.[0-9]{2}")
 
 # Colunas aceitas em --ordenar (as mesmas chaves que a API aceita em /api/cli/records).
 COLUNAS_ORDENACAO = ("id", "data_venda", "produto_nome", "categoria", "quantidade", "valor_total")
@@ -96,6 +100,10 @@ class ErroDaApi(Exception):
 
 class ApiIndisponivel(Exception):
     """Não foi possível conectar à API."""
+
+
+class RespostaInesperada(Exception):
+    """A API respondeu, mas sem os dados no formato esperado (ex.: CLI e API de versões diferentes)."""
 
 
 class TokenAusente(Exception):
@@ -474,8 +482,11 @@ def _gravar_arquivo(caminho, conteudo, substituir):
     return True
 
 
-def _escrever_na_saida_padrao(conteudo):
-    """Escreve os bytes da API no stdout, sem mudar o BOM nem o CRLF. Retorna False se falhar."""
+def _escrever_na_saida_padrao(conteudo, descricao="o CSV"):
+    """Escreve os bytes no stdout (o CSV da API sem mudar o BOM nem o CRLF). Retorna False se falhar.
+
+    `descricao` é o que está sendo escrito, para a mensagem de erro (ex.: "os indicadores").
+    """
     try:
         sys.stdout.flush()
         restante = memoryview(conteudo)
@@ -496,7 +507,7 @@ def _escrever_na_saida_padrao(conteudo):
             pass  # stdout sem descritor de arquivo (ex.: capturado): não há o que redirecionar
         return False
     except OSError as erro:
-        print(f"Erro: não foi possível escrever o CSV na saída padrão ({motivo_da_falha(erro)}).", file=sys.stderr)
+        print(f"Erro: não foi possível escrever {descricao} na saída padrão ({motivo_da_falha(erro)}).", file=sys.stderr)
         return False
     return True
 
@@ -507,7 +518,9 @@ def inteiro_brasileiro(numero):
 
 
 def mes_brasileiro(ano_mes):
-    """Mês da API ("2026-10") no formato do gráfico da Web ("out/2026")."""
+    """Mês da API ("2026-10") no formato do gráfico da Web ("out/2026"). Lança ValueError se o mês não existir."""
+    if not FORMATO_MES.fullmatch(ano_mes):
+        raise ValueError(f"mês inválido: {ano_mes!r}")
     ano, mes = ano_mes.split("-")
     return f"{MESES_ABREVIADOS[int(mes) - 1]}/{ano}"
 
@@ -520,6 +533,65 @@ def barra_de_texto(valor, maximo):
     if valor <= 0 or maximo <= 0:
         return ""
     return BLOCO_BARRA * max(1, round(valor / maximo * LARGURA_BARRA))
+
+
+def _exigir(condicao):
+    """Recusa a resposta da API que não tem os indicadores no formato esperado."""
+    if not condicao:
+        raise RespostaInesperada("a resposta não tem os indicadores esperados")
+
+
+def _inteiro_da_api(valor):
+    """Contagem da API: inteiro >= 0 (bool, float e texto são recusados)."""
+    _exigir(type(valor) is int and valor >= 0)
+    return valor
+
+
+def _valor_da_api(valor):
+    """Valor em reais da API, sempre texto com 2 casas ("1234.50"), como Decimal."""
+    _exigir(isinstance(valor, str) and FORMATO_VALOR.fullmatch(valor) is not None)
+    return Decimal(valor)
+
+
+def _texto_da_api(valor):
+    _exigir(isinstance(valor, str))
+    return valor
+
+
+def _itens_da_api(corpo, chave, campos):
+    """Lista de objetos `corpo[chave]`, cada um com os `campos` ({nome: leitor}), como tuplas na mesma ordem."""
+    itens = corpo.get(chave)
+    _exigir(isinstance(itens, list) and all(isinstance(item, dict) for item in itens))
+    _exigir(all(nome in item for item in itens for nome in campos))
+    return [tuple(ler(item[nome]) for nome, ler in campos.items()) for item in itens]
+
+
+def _mes_da_api(valor):
+    _exigir(isinstance(valor, str) and FORMATO_MES.fullmatch(valor) is not None)
+    return valor
+
+
+def ler_indicadores(corpo):
+    """Valida a resposta de GET /api/cli/dashboard e devolve os dados já convertidos.
+
+    Lança RespostaInesperada se faltar algo ou algum tipo estiver errado (ex.: CLI e API de versões
+    diferentes). A validação vem antes da formatação: um erro da própria CLI ao formatar não é
+    confundido com uma resposta inválida.
+    """
+    _exigir(isinstance(corpo.get("resumo"), dict))
+    resumo = corpo["resumo"]
+    _exigir("total_vendas" in resumo and "faturamento_total" in resumo)
+    return {
+        "total_vendas": _inteiro_da_api(resumo["total_vendas"]),
+        "faturamento_total": _valor_da_api(resumo["faturamento_total"]),
+        "meses": _itens_da_api(corpo, "faturamento_por_mes", {"mes": _mes_da_api, "total": _valor_da_api}),
+        "categorias": _itens_da_api(
+            corpo, "faturamento_por_categoria", {"categoria": _texto_da_api, "total": _valor_da_api}
+        ),
+        "produtos": _itens_da_api(
+            corpo, "top_produtos", {"produto_nome": _texto_da_api, "quantidade": _inteiro_da_api}
+        ),
+    }
 
 
 def _linhas_com_barras(itens):
@@ -538,51 +610,45 @@ def _indicador(titulo, itens, texto_vazio, tem_dados):
     return ["", titulo, *(_linhas_com_barras(itens) if tem_dados else [f"  {texto_vazio}"])]
 
 
-def formatar_indicadores(corpo):
+def formatar_indicadores(indicadores):
     """Linhas de texto com o resumo e os 3 indicadores do dashboard da Web (#6), na mesma ordem e com os mesmos valores.
 
-    Lança ApiIndisponivel se a resposta não tiver os indicadores no formato esperado: nada é impresso pela metade.
+    `indicadores` é o retorno de `ler_indicadores` (dados já validados).
     """
-    try:
-        resumo = corpo["resumo"]
-        meses = [
-            (mes_brasileiro(item["mes"]), moeda(item["total"]), Decimal(item["total"]))
-            for item in corpo["faturamento_por_mes"]
-        ]
-        categorias = [
-            (item["categoria"], moeda(item["total"]), Decimal(item["total"])) for item in corpo["faturamento_por_categoria"]
-        ]
-        produtos = [
-            (
-                f"{posicao}. {item['produto_nome']}",
-                f"{inteiro_brasileiro(item['quantidade'])} {'unidade' if item['quantidade'] == 1 else 'unidades'}",
-                item["quantidade"],
-            )
-            for posicao, item in enumerate(corpo["top_produtos"], start=1)
-        ]
-        return [
-            f"Vendas registradas (todo o período): {inteiro_brasileiro(resumo['total_vendas'])}",
-            f"Faturamento total (todo o período): {moeda(resumo['faturamento_total'])}",
-            # Mesmas regras de vazio da Web: os meses somem se todos forem zero; as categorias do catálogo
-            # aparecem mesmo zeradas; o top 5 só tem produtos vendidos.
-            *_indicador(
-                f"Faturamento por mês (últimos {len(meses)} meses)",
-                meses,
-                f"Sem vendas nos últimos {len(meses)} meses.",
-                any(valor > 0 for _, _, valor in meses),
-            ),
-            *_indicador("Faturamento por categoria", categorias, "Nenhuma categoria cadastrada.", bool(categorias)),
-            *_indicador("Top 5 produtos (mais unidades vendidas)", produtos, "Sem vendas registradas.", bool(produtos)),
-        ]
-    except (KeyError, IndexError, TypeError, ValueError, AttributeError, ArithmeticError):
-        # ArithmeticError inclui o InvalidOperation do Decimal (valor que não é número).
-        raise ApiIndisponivel("a resposta não tem os indicadores esperados") from None
+    meses = [(mes_brasileiro(mes), moeda(total), total) for mes, total in indicadores["meses"]]
+    categorias = [(categoria, moeda(total), total) for categoria, total in indicadores["categorias"]]
+    produtos = [
+        (
+            f"{posicao}. {nome}",
+            f"{inteiro_brasileiro(quantidade)} {'unidade' if quantidade == 1 else 'unidades'}",
+            quantidade,
+        )
+        for posicao, (nome, quantidade) in enumerate(indicadores["produtos"], start=1)
+    ]
+    return [
+        f"Vendas registradas (todo o período): {inteiro_brasileiro(indicadores['total_vendas'])}",
+        f"Faturamento total (todo o período): {moeda(indicadores['faturamento_total'])}",
+        # Mesmas regras de vazio da Web: os meses somem se todos forem zero; as categorias do catálogo
+        # aparecem mesmo zeradas; o top 5 só tem produtos vendidos.
+        *_indicador(
+            f"Faturamento por mês (últimos {len(meses)} meses)",
+            meses,
+            f"Sem vendas nos últimos {len(meses)} meses.",
+            any(valor > 0 for _, _, valor in meses),
+        ),
+        *_indicador("Faturamento por categoria", categorias, "Nenhuma categoria cadastrada.", bool(categorias)),
+        *_indicador("Top 5 produtos (mais unidades vendidas)", produtos, "Sem vendas registradas.", bool(produtos)),
+    ]
 
 
 def comando_indicadores(_argumentos):
     """Comando protegido: GET /api/cli/dashboard. Mostra em texto os 3 indicadores do dashboard da Web."""
     corpo = requisitar("GET", "/dashboard", token=token_do_ambiente())
-    print("\n".join(formatar_indicadores(corpo)))
+    texto = "\n".join(formatar_indicadores(ler_indicadores(corpo))) + "\n"
+    codificacao = getattr(sys.stdout, "encoding", None) or "utf-8"
+    # Mesma escrita do `exportar`: com `| head`, o pipe fechado sai em silêncio, sem traceback.
+    if not _escrever_na_saida_padrao(texto.encode(codificacao, errors="replace"), "os indicadores"):
+        return SAIDA_ERRO
     return SAIDA_SUCESSO
 
 
@@ -767,7 +833,6 @@ def criar_parser():
 
     indicadores = subcomandos.add_parser(
         "indicadores",
-        aliases=["dashboard"],
         help="mostra em texto os 3 indicadores do dashboard da Web (protegido)",
         description=(
             "Mostra em texto o resumo e os 3 indicadores do dashboard da Web, com os mesmos valores: "
@@ -812,6 +877,9 @@ def main(argv=None):
         return SAIDA_NAO_AUTENTICADO if erro.status == 401 else SAIDA_ERRO
     except ApiIndisponivel as erro:
         print(f"Erro: não foi possível conectar à API em {url_api()} ({erro}).", file=sys.stderr)
+        return SAIDA_ERRO
+    except RespostaInesperada as erro:
+        print(f"Erro: resposta inesperada da API em {url_api()} ({erro}).", file=sys.stderr)
         return SAIDA_ERRO
     except (KeyboardInterrupt, EOFError):
         print("\nCancelado.", file=sys.stderr)

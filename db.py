@@ -600,13 +600,76 @@ def exportar_vendas_cli(filtros, ordenar, direcao, request_id):
     return linhas
 
 
-# Indicadores do dashboard da Web (#6). Consultas próprias, lidas no mesmo snapshot.
+# Indicadores do dashboard (#6 na Web, #12 na CLI). Cada cliente tem as suas consultas; as constantes são
+# as mesmas, para os dois mostrarem os mesmos valores. Parâmetros: `referencia` (a data de hoje), `meses`
+# e `limite`.
 MESES_DASHBOARD = 12
 TOP_PRODUTOS_DASHBOARD = 5
 
+# Consultas próprias do dashboard da Web (#6).
+CONSULTAS_DASHBOARD_WEB = {
+    "resumo": "SELECT COUNT(*) AS total_vendas, COALESCE(SUM(valor_total), 0) AS faturamento_total FROM venda",
+    "faturamento_por_mes": """
+        SELECT to_char(meses.mes, 'YYYY-MM') AS mes, COALESCE(SUM(venda.valor_total), 0) AS total
+        FROM generate_series(
+            date_trunc('month', %(referencia)s::timestamp) - make_interval(months => %(meses)s - 1),
+            date_trunc('month', %(referencia)s::timestamp),
+            interval '1 month'
+        ) AS meses(mes)
+        LEFT JOIN venda ON date_trunc('month', venda.data_venda::timestamp) = meses.mes
+        GROUP BY meses.mes
+        ORDER BY meses.mes
+    """,
+    "faturamento_por_categoria": """
+        SELECT produto.categoria, COALESCE(SUM(venda.valor_total), 0) AS total
+        FROM produto LEFT JOIN venda ON venda.produto_id = produto.id
+        GROUP BY produto.categoria
+        ORDER BY total DESC, produto.categoria
+    """,
+    "top_produtos": """
+        SELECT produto.id AS produto_id, produto.nome AS produto_nome, SUM(venda.quantidade) AS quantidade
+        FROM venda JOIN produto ON produto.id = venda.produto_id
+        GROUP BY produto.id, produto.nome
+        ORDER BY quantidade DESC, produto.nome
+        LIMIT %(limite)s
+    """,
+}
 
-def indicadores_dashboard_web(data_referencia, request_id):
-    """Retorna os 3 indicadores do dashboard da Web e um resumo, todos do mesmo snapshot.
+# Consultas próprias dos indicadores pela CLI (#12), com as mesmas regras das da Web.
+CONSULTAS_DASHBOARD_CLI = {
+    "resumo": """
+        SELECT COUNT(venda.id) AS total_vendas, COALESCE(SUM(venda.valor_total), 0) AS faturamento_total
+        FROM venda
+    """,
+    "faturamento_por_mes": """
+        SELECT to_char(janela.mes, 'YYYY-MM') AS mes, COALESCE(SUM(venda.valor_total), 0) AS total
+        FROM generate_series(
+            date_trunc('month', %(referencia)s::timestamp) - make_interval(months => %(meses)s - 1),
+            date_trunc('month', %(referencia)s::timestamp),
+            interval '1 month'
+        ) AS janela(mes)
+        LEFT JOIN venda ON date_trunc('month', venda.data_venda::timestamp) = janela.mes
+        GROUP BY janela.mes
+        ORDER BY janela.mes
+    """,
+    "faturamento_por_categoria": """
+        SELECT produto.categoria, COALESCE(SUM(venda.valor_total), 0) AS total
+        FROM produto LEFT JOIN venda ON venda.produto_id = produto.id
+        GROUP BY produto.categoria
+        ORDER BY total DESC, produto.categoria
+    """,
+    "top_produtos": """
+        SELECT produto.id AS produto_id, produto.nome AS produto_nome, SUM(venda.quantidade) AS quantidade
+        FROM venda JOIN produto ON produto.id = venda.produto_id
+        GROUP BY produto.id, produto.nome
+        ORDER BY quantidade DESC, produto.nome
+        LIMIT %(limite)s
+    """,
+}
+
+
+def _ler_indicadores(consultas, cliente, data_referencia, request_id):
+    """Executa as 4 consultas de `consultas` no mesmo snapshot e retorna o resumo e os 3 indicadores.
 
     - resumo: total de vendas e faturamento de todo o período;
     - faturamento_por_mes: soma de valor_total em cada um dos MESES_DASHBOARD meses de calendário
@@ -614,133 +677,37 @@ def indicadores_dashboard_web(data_referencia, request_id):
     - faturamento_por_categoria: soma de valor_total por categoria do catálogo (categoria sem venda = 0);
     - top_produtos: os TOP_PRODUTOS_DASHBOARD produtos com mais unidades vendidas.
     """
+    parametros = {"referencia": data_referencia, "meses": MESES_DASHBOARD, "limite": TOP_PRODUTOS_DASHBOARD}
     try:
         with obter_conexao() as conexao:
-            # REPEATABLE READ: os três gráficos e o resumo veem as mesmas vendas.
+            # REPEATABLE READ: os três indicadores e o resumo veem as mesmas vendas.
             # Somente leitura: impede que uma escrita entre aqui por engano.
             conexao.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
             conexao.read_only = True
-            resumo = conexao.execute(
-                "SELECT COUNT(*) AS total_vendas, COALESCE(SUM(valor_total), 0) AS faturamento_total FROM venda"
-            ).fetchone()
-            por_mes = conexao.execute(
-                """
-                SELECT to_char(meses.mes, 'YYYY-MM') AS mes, COALESCE(SUM(venda.valor_total), 0) AS total
-                FROM generate_series(
-                    date_trunc('month', %(referencia)s::timestamp) - make_interval(months => %(meses)s - 1),
-                    date_trunc('month', %(referencia)s::timestamp),
-                    interval '1 month'
-                ) AS meses(mes)
-                LEFT JOIN venda ON date_trunc('month', venda.data_venda::timestamp) = meses.mes
-                GROUP BY meses.mes
-                ORDER BY meses.mes
-                """,
-                {"referencia": data_referencia, "meses": MESES_DASHBOARD},
-            ).fetchall()
-            por_categoria = conexao.execute(
-                """
-                SELECT produto.categoria, COALESCE(SUM(venda.valor_total), 0) AS total
-                FROM produto LEFT JOIN venda ON venda.produto_id = produto.id
-                GROUP BY produto.categoria
-                ORDER BY total DESC, produto.categoria
-                """
-            ).fetchall()
-            top_produtos = conexao.execute(
-                """
-                SELECT produto.id AS produto_id, produto.nome AS produto_nome, SUM(venda.quantidade) AS quantidade
-                FROM venda JOIN produto ON produto.id = venda.produto_id
-                GROUP BY produto.id, produto.nome
-                ORDER BY quantidade DESC, produto.nome
-                LIMIT %s
-                """,
-                (TOP_PRODUTOS_DASHBOARD,),
-            ).fetchall()
+            resumo = conexao.execute(consultas["resumo"], parametros).fetchone()
+            indicadores = {
+                nome: conexao.execute(consultas[nome], parametros).fetchall()
+                for nome in ("faturamento_por_mes", "faturamento_por_categoria", "top_produtos")
+            }
     except psycopg.Error:
-        registrar_log("ERROR", "web", "dashboard", "error", request_id, "Falha ao calcular os indicadores")
+        registrar_log("ERROR", cliente, "dashboard", "error", request_id, "Falha ao calcular os indicadores")
         raise
     registrar_log(
         "INFO",
-        "web",
+        cliente,
         "dashboard",
         "success",
         request_id,
         f"Indicadores calculados sobre {resumo['total_vendas']} vendas",
     )
-    return {
-        "resumo": resumo,
-        "faturamento_por_mes": por_mes,
-        "faturamento_por_categoria": por_categoria,
-        "top_produtos": top_produtos,
-    }
+    return {"resumo": resumo, **indicadores}
 
 
-# Indicadores pela CLI (#12). Consultas próprias da CLI, com as mesmas regras do dashboard da Web (#6)
-# e as mesmas constantes (MESES_DASHBOARD, TOP_PRODUTOS_DASHBOARD), para mostrar os mesmos valores.
+def indicadores_dashboard_web(data_referencia, request_id):
+    """Resumo e os 3 indicadores do dashboard da Web (#6), com as consultas da Web."""
+    return _ler_indicadores(CONSULTAS_DASHBOARD_WEB, "web", data_referencia, request_id)
+
+
 def indicadores_dashboard_cli(data_referencia, request_id):
-    """Retorna o resumo e os 3 indicadores do dashboard para o comando `indicadores` da CLI.
-
-    Mesmo formato de `indicadores_dashboard_web`: resumo de todo o período, faturamento dos
-    MESES_DASHBOARD meses de calendário até o mês de `data_referencia` (mês sem venda = 0),
-    faturamento por categoria do catálogo (categoria sem venda = 0) e os TOP_PRODUTOS_DASHBOARD
-    produtos com mais unidades vendidas. Tudo lido no mesmo snapshot.
-    """
-    try:
-        with obter_conexao() as conexao:
-            # REPEATABLE READ: o resumo e os três indicadores veem as mesmas vendas; somente leitura.
-            conexao.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
-            conexao.read_only = True
-            resumo = conexao.execute(
-                """
-                SELECT COUNT(venda.id) AS total_vendas, COALESCE(SUM(venda.valor_total), 0) AS faturamento_total
-                FROM venda
-                """
-            ).fetchone()
-            por_mes = conexao.execute(
-                """
-                SELECT to_char(janela.mes, 'YYYY-MM') AS mes, COALESCE(SUM(venda.valor_total), 0) AS total
-                FROM generate_series(
-                    date_trunc('month', %(referencia)s::timestamp) - make_interval(months => %(meses)s - 1),
-                    date_trunc('month', %(referencia)s::timestamp),
-                    interval '1 month'
-                ) AS janela(mes)
-                LEFT JOIN venda ON date_trunc('month', venda.data_venda::timestamp) = janela.mes
-                GROUP BY janela.mes
-                ORDER BY janela.mes
-                """,
-                {"referencia": data_referencia, "meses": MESES_DASHBOARD},
-            ).fetchall()
-            por_categoria = conexao.execute(
-                """
-                SELECT produto.categoria, COALESCE(SUM(venda.valor_total), 0) AS total
-                FROM produto LEFT JOIN venda ON venda.produto_id = produto.id
-                GROUP BY produto.categoria
-                ORDER BY total DESC, produto.categoria
-                """
-            ).fetchall()
-            top_produtos = conexao.execute(
-                """
-                SELECT produto.id AS produto_id, produto.nome AS produto_nome, SUM(venda.quantidade) AS quantidade
-                FROM venda JOIN produto ON produto.id = venda.produto_id
-                GROUP BY produto.id, produto.nome
-                ORDER BY quantidade DESC, produto.nome
-                LIMIT %(limite)s
-                """,
-                {"limite": TOP_PRODUTOS_DASHBOARD},
-            ).fetchall()
-    except psycopg.Error:
-        registrar_log("ERROR", "cli", "dashboard", "error", request_id, "Falha ao calcular os indicadores")
-        raise
-    registrar_log(
-        "INFO",
-        "cli",
-        "dashboard",
-        "success",
-        request_id,
-        f"Indicadores calculados sobre {resumo['total_vendas']} vendas",
-    )
-    return {
-        "resumo": resumo,
-        "faturamento_por_mes": por_mes,
-        "faturamento_por_categoria": por_categoria,
-        "top_produtos": top_produtos,
-    }
+    """Resumo e os 3 indicadores do comando `indicadores` da CLI (#12), com as consultas da CLI."""
+    return _ler_indicadores(CONSULTAS_DASHBOARD_CLI, "cli", data_referencia, request_id)

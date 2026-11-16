@@ -331,7 +331,7 @@ Os gráficos são desenhados em HTML e CSS dentro do `index.html`, sem bibliotec
 | **Faturamento por categoria** (barras) | Quanto cada categoria do catálogo representa nas vendas | Soma de `venda.valor_total` por `produto.categoria`, partindo da tabela `produto` com `LEFT JOIN` em `venda`: categorias sem venda aparecem com R$ 0,00. Ordenado do maior para o menor faturamento |
 | **Top 5 produtos** (barras) | Os produtos mais vendidos em volume | Soma de `venda.quantidade` por produto, ordenada da maior para a menor; empate desempatado pelo nome. Mostra no máximo 5 produtos; produtos sem venda não entram |
 
-O resumo acima dos gráficos traz `COUNT(*)` e `SUM(valor_total)` de **todas** as vendas, por isso o rótulo diz "todo o período": com histórico maior que 12 meses, ele é maior que a soma das colunas do gráfico de meses. Todas as consultas rodam na mesma transação, `REPEATABLE READ` e somente leitura, então o resumo e os 3 gráficos sempre se referem às mesmas vendas, mesmo se outra sessão alterar dados no meio. As consultas são próprias do dashboard Web (`indicadores_dashboard_web` no `db.py`).
+O resumo acima dos gráficos traz `COUNT(*)` e `SUM(valor_total)` de **todas** as vendas, por isso o rótulo diz "todo o período": com histórico maior que 12 meses, ele é maior que a soma das colunas do gráfico de meses. Todas as consultas rodam na mesma transação, `REPEATABLE READ` e somente leitura, então o resumo e os 3 gráficos sempre se referem às mesmas vendas, mesmo se outra sessão alterar dados no meio. As consultas são próprias do dashboard Web (`CONSULTAS_DASHBOARD_WEB`, usadas por `indicadores_dashboard_web` no `db.py`).
 
 ### Endpoint desta issue
 
@@ -777,7 +777,7 @@ O comando `indicadores` mostra no terminal o **resumo e os 3 indicadores do dash
 
 | Subcomando | Rota | O que faz |
 |---|---|---|
-| `indicadores` (ou `dashboard`) | `GET /api/cli/dashboard` | Mostra o resumo e os 3 indicadores em texto |
+| `indicadores` | `GET /api/cli/dashboard` | Mostra o resumo e os 3 indicadores em texto |
 
 - **Mesmos indicadores e valores da Web**: as regras são as da tabela "Os 3 indicadores" da #6 — 12 meses de calendário até o mês atual (no fuso `FUSO_HORARIO`), categorias do catálogo mesmo sem venda, top 5 por unidades vendidas com desempate pelo nome. A rota da CLI devolve exatamente o mesmo JSON de `/api/web/dashboard` (os testes comparam as duas respostas).
 - **Mensagens de vazio iguais às da Web**: "Sem vendas nos últimos 12 meses." quando todos os meses estão zerados e "Sem vendas registradas." no top 5 sem vendas; as categorias aparecem mesmo zeradas.
@@ -817,7 +817,9 @@ Top 5 produtos (mais unidades vendidas)
 
 (Na saída real aparecem os 12 meses; os de dez/2025 a jun/2026 foram omitidos aqui.) Para conferir, abra o dashboard da Web: os números são os mesmos. Depois de cadastrar, editar ou excluir uma venda (pela Web ou pela CLI), basta rodar o comando de novo.
 
-Códigos de saída: `0` sucesso (mesmo sem vendas); `1` erro da API, API fora do ar ou resposta sem os indicadores esperados (nesse caso nada é impresso pela metade); `3` sem token ou token inválido.
+Se a API responder sem os indicadores no formato esperado (ex.: CLI e API de versões diferentes), nada é impresso e o erro diz que a resposta é inesperada, e não que a conexão falhou: `Erro: resposta inesperada da API em http://api:8000 (a resposta não tem os indicadores esperados).`. A resposta é validada inteira (campos, tipos, meses de `01` a `12` e valores com 2 casas) antes de qualquer linha ser escrita. Se quem lê a saída fechar o pipe antes do fim (ex.: `indicadores | head -3`), o comando para em silêncio, sem traceback, como no `exportar`.
+
+Códigos de saída: `0` sucesso (mesmo sem vendas); `1` erro da API, API fora do ar, resposta inesperada, falha ao escrever na saída padrão ou pipe fechado antes do fim; `3` sem token ou token inválido.
 
 ### Endpoint desta issue
 
@@ -827,7 +829,7 @@ Exige `Authorization: Bearer <token da CLI>`; sem token, com token inválido ou 
 |---|---|---|
 | GET | `/api/cli/dashboard` | `200` com `resumo`, `faturamento_por_mes`, `faturamento_por_categoria` e `top_produtos` (mesmo formato de `/api/web/dashboard`) |
 
-As consultas SQL são próprias da CLI (`indicadores_dashboard_cli` no `db.py`), com as mesmas regras e as mesmas constantes da Web (`MESES_DASHBOARD = 12`, `TOP_PRODUTOS_DASHBOARD = 5`), numa transação `REPEATABLE READ` e somente leitura: o resumo e os 3 indicadores sempre se referem às mesmas vendas. O JSON é montado pela mesma função da Web (`indicadores_para_json` no `api.py`), com os valores em reais pela regra única `valor_json`.
+As consultas SQL são próprias da CLI (`CONSULTAS_DASHBOARD_CLI`, usadas por `indicadores_dashboard_cli` no `db.py`), com as mesmas regras e as mesmas constantes da Web (`MESES_DASHBOARD = 12`, `TOP_PRODUTOS_DASHBOARD = 5`). A execução é comum aos dois clientes (`_ler_indicadores`): as 4 consultas rodam numa transação `REPEATABLE READ` e somente leitura, então o resumo e os 3 indicadores sempre se referem às mesmas vendas, e o log sai com o `client` de quem chamou. Na API, as duas rotas usam `responder_indicadores`, que só muda a consulta do banco, e o JSON é montado por `indicadores_para_json`, com os valores em reais pela regra única `valor_json`.
 
 ```bash
 curl -s http://localhost:8080/api/cli/dashboard -H "Authorization: Bearer $TOKEN_CLI"

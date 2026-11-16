@@ -700,17 +700,22 @@ def indicadores_para_json(indicadores):
     }
 
 
+def responder_indicadores(consultar_no_banco):
+    """Indicadores do dashboard (Web e CLI). `consultar_no_banco` é a consulta do cliente da rota."""
+    try:
+        # Os 12 meses terminam no mês de hoje, no mesmo fuso usado na validação das vendas.
+        indicadores = consultar_no_banco(hoje(), g.request_id)
+    except psycopg.Error:
+        return resposta_falha_no_banco("dashboard")
+    total = indicadores["resumo"]["total_vendas"]
+    registrar_log("INFO", origem_da_requisicao(), "dashboard", "success", f"Indicadores enviados ({total} vendas)")
+    return jsonify(indicadores_para_json(indicadores)), 200
+
+
 @app.get("/api/web/dashboard")
 @exigir_autenticacao_web("dashboard")
 def web_dashboard():
-    try:
-        # O gráfico de meses termina no mês de hoje, no mesmo fuso usado na validação das vendas.
-        indicadores = db.indicadores_dashboard_web(hoje(), g.request_id)
-    except psycopg.Error:
-        return resposta_falha_no_banco("dashboard")
-    resumo = indicadores["resumo"]
-    registrar_log("INFO", "web", "dashboard", "success", f"Indicadores enviados ({resumo['total_vendas']} vendas)")
-    return jsonify(indicadores_para_json(indicadores)), 200
+    return responder_indicadores(db.indicadores_dashboard_web)
 
 
 @app.delete("/api/web/records/<id_venda>")
@@ -836,15 +841,8 @@ def cli_excluir_venda(id_venda):
 @app.get("/api/cli/dashboard")
 @exigir_autenticacao_cli("dashboard")
 def cli_dashboard():
-    """Indicadores da CLI: os mesmos 3 indicadores e valores do dashboard da Web, com a consulta própria da CLI."""
-    try:
-        # Mesma data de referência da Web: os 12 meses terminam no mês de hoje, no fuso FUSO_HORARIO.
-        indicadores = db.indicadores_dashboard_cli(hoje(), g.request_id)
-    except psycopg.Error:
-        return resposta_falha_no_banco("dashboard")
-    resumo = indicadores["resumo"]
-    registrar_log("INFO", "cli", "dashboard", "success", f"Indicadores enviados ({resumo['total_vendas']} vendas)")
-    return jsonify(indicadores_para_json(indicadores)), 200
+    """Os mesmos 3 indicadores e valores do dashboard da Web, com a consulta própria da CLI."""
+    return responder_indicadores(db.indicadores_dashboard_cli)
 
 
 def inicializar():
