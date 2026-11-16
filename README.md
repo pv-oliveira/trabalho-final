@@ -600,6 +600,81 @@ A listagem (leitura) e a exclusão registram uma linha na camada `api` e outra n
 docker compose logs api | grep '"client": "cli"' | grep -E 'listar_vendas|excluir_venda'
 ```
 
+## #10 — Busca avançada com filtros combináveis pela CLI
+
+O comando `buscar` filtra as vendas com **os mesmos filtros e as mesmas regras da busca da Web** (#4): os mesmos parâmetros dão as mesmas vendas nos dois clientes. O comando é protegido (exige o `TOKEN_CLI` obtido com `login`, seção #7) e usa uma rota própria da CLI e uma consulta SQL própria da CLI (`buscar_vendas_cli` no `db.py`). A CLI não acessa o banco: tudo passa pela API.
+
+### Comando
+
+| Subcomando | Rota | O que faz |
+|---|---|---|
+| `buscar [--produto ID] [--categoria NOME] [--data-inicio AAAA-MM-DD] [--data-fim AAAA-MM-DD] [--pagina N] [--tamanho N] [--ordenar CAMPO] [--direcao asc\|desc]` | `GET /api/cli/records/search` | Busca vendas com filtros combináveis |
+
+### Filtros disponíveis
+
+Os filtros são combinados com **E** (a venda precisa atender a todos os informados). Filtro omitido ou vazio não restringe a busca; sem nenhum filtro, `buscar` mostra todas as vendas.
+
+| Opção | Parâmetro | Regra (a mesma da Web) |
+|---|---|---|
+| `--produto` | `produto_id` | Id de um produto do catálogo (veja `produtos`). Um número válido sem produto cadastrado devolve zero vendas |
+| `--categoria` | `categoria` | Nome exato da categoria, com a inicial maiúscula (hoje `Alimentos`, `Bebidas`, `Higiene` ou `Limpeza`). Uma categoria sem produtos devolve zero vendas |
+| `--data-inicio` | `data_inicio` | `AAAA-MM-DD`. Vendas a partir dessa data, inclusive |
+| `--data-fim` | `data_fim` | `AAAA-MM-DD`. Vendas até essa data, inclusive. Não pode ser anterior a `--data-inicio` |
+
+`--data-inicio` e `--data-fim` formam o filtro de **período** e podem ser usados juntos ou separados. Página, tamanho e ordenação têm as mesmas opções e os mesmos padrões do `listar` (#9): `--pagina` 1, `--tamanho` 10 (de 1 a 100), `--ordenar data_venda`, `--direcao desc`, com o número da venda desempatando.
+
+### Exemplos
+
+```bash
+export TOKEN_CLI='<token impresso pelo login>'   # veja a seção #7
+# 1 filtro: vendas de Bebidas
+docker compose run --rm cli buscar --categoria Bebidas
+# 2 filtros: vendas do produto 1 a partir de 01/10/2026
+docker compose run --rm cli buscar --produto 1 --data-inicio 2026-10-01
+# 3 filtros: Alimentos em outubro de 2026, maiores valores primeiro, 5 por página, página 2
+docker compose run --rm cli buscar --categoria Alimentos --data-inicio 2026-10-01 --data-fim 2026-10-31 \
+  --ordenar valor_total --direcao desc --tamanho 5 --pagina 2
+```
+
+A primeira linha mostra os filtros aplicados; depois vêm a tabela, no formato do `listar`, e o rodapé com o total de vendas encontradas:
+
+```text
+Filtros: categoria Alimentos, de 01/10/2026 até 31/10/2026
+Nº  Data        Produto      Categoria  Qtd.  Valor total
+ 4  12/10/2026  Feijão 1 kg  Alimentos     4     R$ 34,00
+ 2  05/10/2026  Arroz 5 kg   Alimentos     2     R$ 55,80
+Página 1 de 1 · 2 vendas encontradas · 10 por página · ordenado por data_venda (decrescente)
+```
+
+Sem resultado, `buscar` mostra "Nenhuma venda encontrada com esses filtros."; uma página além da última mostra "A página 5 não existe: há 2 páginas.". Os erros vão para o stderr, sem traceback, com as mesmas mensagens da busca da Web e o nome da opção que causou cada um:
+
+```text
+$ docker compose run --rm cli buscar --produto abc --data-inicio 2026-10-31 --data-fim 2026-10-01
+Erro: Parâmetros inválidos. (HTTP 400)
+  --data-fim: A data final não pode ser anterior à data inicial.
+  --produto: O produto deve ser o número de um produto do catálogo.
+```
+
+Códigos de saída: `0` sucesso (mesmo sem vendas encontradas); `1` erro da API (filtro ou parâmetro inválido) ou API fora do ar; `2` uso incorreto (ex.: `--ordenar preco`); `3` sem token ou token inválido.
+
+### Endpoint desta issue
+
+Exige `Authorization: Bearer <token da CLI>`; sem token, com token inválido ou com token da Web responde `401`.
+
+| Método | Rota | Resposta |
+|---|---|---|
+| GET | `/api/cli/records/search?produto_id=&categoria=&data_inicio=&data_fim=&pagina=&tamanho=&ordenar=&direcao=` | `200 {"vendas", "pagina", "itens_por_pagina", "total", "total_paginas", "ordenar", "direcao", "filtros"}`; `400 {"erro", "campos"}` com filtros ou parâmetros inválidos |
+
+A resposta tem o formato da listagem da CLI (#9), mais `filtros`, com os filtros aplicados (`null` nos ausentes), como na busca da Web. Os filtros são validados pela mesma regra da Web, então os erros `400` são idênticos nos dois clientes. A consulta SQL é própria da busca CLI (`buscar_vendas_cli`): as condições do `WHERE` vêm de uma lista fixa (`CONDICOES_BUSCA_CLI`, igual à da Web) e só entram as dos filtros informados; os valores vão como parâmetros, então o texto enviado nunca entra no SQL. A contagem e a página são lidas na mesma transação, somente leitura.
+
+### Logs
+
+Cada busca registra uma linha na camada `api` e outra na camada `db`, com `client: "cli"`, `operation: "buscar_vendas"` e o mesmo `request_id`. A `message` lista os nomes dos filtros usados (ex.: `Busca (categoria, data_inicio): 2 vendas, página 1 de 1`). Filtros ou parâmetros inválidos são recusados antes do banco, com `WARN` só na camada `api`; falha no banco gera `ERROR`.
+
+```bash
+docker compose logs api | grep '"client": "cli"' | grep buscar_vendas
+```
+
 ## Logs
 
 Cada evento é uma linha JSON no stdout, com `timestamp`, `level`, `layer` (`api`/`db`), `client` (`web`/`cli`), `operation`, `status`, `request_id` e `message`. API e banco compartilham o mesmo `request_id` dentro de uma requisição (também devolvido no header `X-Request-ID`). A inicialização do banco usa `client: "sistema"` e `request_id: "inicializacao"`. Erros não previstos na API viram `500 {"erro": "Erro interno"}` com log `ERROR`. Nas rotas `/api/*`, rota inexistente e método não permitido também respondem em JSON (`404 {"erro": "Rota não encontrada"}`, `405 {"erro": "Método não permitido"}`, este com o header `Allow`), com log `WARN` e o `client` da rota (`cli` em `/api/cli/*`).
