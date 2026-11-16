@@ -380,7 +380,7 @@ Exemplo com 6 vendas de agosto a outubro de 2026, consultado em outubro (os mese
 Cada carregamento registra uma linha na camada `api` e outra na camada `db`, com `operation: "dashboard"`, `client: "web"` e o mesmo `request_id`. A mensagem traz só a quantidade de vendas consideradas. Falha no banco gera `ERROR` nas duas camadas.
 
 ```bash
-docker compose logs api | grep '"operation": "dashboard"'
+docker compose logs api | grep '"client": "web"' | grep '"operation": "dashboard"'
 ```
 
 ## #7 — Estrutura CLI: ajuda, subcomandos, healthcheck e token
@@ -767,6 +767,78 @@ Cada exportação registra uma linha na camada `api` e outra na camada `db`, com
 
 ```bash
 docker compose logs api | grep '"client": "cli"' | grep exportar_vendas
+```
+
+## #12 — Indicadores em texto pela CLI
+
+O comando `indicadores` mostra no terminal o **resumo e os 3 indicadores do dashboard da Web (#6)**, na mesma ordem e com os mesmos valores: faturamento por mês, faturamento por categoria e top 5 produtos. Cada linha traz o valor exato e uma barra de texto proporcional ao maior valor do indicador, como as barras dos gráficos da Web.
+
+### Comando
+
+| Subcomando | Rota | O que faz |
+|---|---|---|
+| `indicadores` (ou `dashboard`) | `GET /api/cli/dashboard` | Mostra o resumo e os 3 indicadores em texto |
+
+- **Mesmos indicadores e valores da Web**: as regras são as da tabela "Os 3 indicadores" da #6 — 12 meses de calendário até o mês atual (no fuso `FUSO_HORARIO`), categorias do catálogo mesmo sem venda, top 5 por unidades vendidas com desempate pelo nome. A rota da CLI devolve exatamente o mesmo JSON de `/api/web/dashboard` (os testes comparam as duas respostas).
+- **Mensagens de vazio iguais às da Web**: "Sem vendas nos últimos 12 meses." quando todos os meses estão zerados e "Sem vendas registradas." no top 5 sem vendas; as categorias aparecem mesmo zeradas.
+- **Formato brasileiro**: valores em reais (`R$ 1.234,50`), meses abreviados como no gráfico (`out/2026`) e milhar com ponto (`1.234 unidades`).
+- **Barras**: o maior valor de cada indicador tem 30 blocos (`█`) e os outros, proporcionais. Zero não desenha barra; um valor positivo pequeno tem pelo menos 1 bloco, para não parecer zero.
+
+### Exemplo
+
+Com as mesmas 6 vendas do exemplo da #6, consultado em outubro de 2026:
+
+```text
+$ docker compose run --rm cli indicadores
+Vendas registradas (todo o período): 6
+Faturamento total (todo o período): R$ 198,49
+
+Faturamento por mês (últimos 12 meses)
+  nov/2025    R$ 0,00
+  …
+  jul/2026    R$ 0,00
+  ago/2026   R$ 55,80  █████████████████
+  set/2026  R$ 100,00  ██████████████████████████████
+  out/2026   R$ 42,69  █████████████
+
+Faturamento por categoria
+  Alimentos  R$ 140,80  ██████████████████████████████
+  Bebidas     R$ 29,70  ██████
+  Higiene     R$ 25,00  █████
+  Limpeza      R$ 2,99  █
+
+Top 5 produtos (mais unidades vendidas)
+  1. Feijão 1 kg        10 unidades  ██████████████████████████████
+  2. Sabonete           10 unidades  ██████████████████████████████
+  3. Refrigerante 2 L    3 unidades  █████████
+  4. Arroz 5 kg          2 unidades  ██████
+  5. Detergente 500 ml    1 unidade  ███
+```
+
+(Na saída real aparecem os 12 meses; os de dez/2025 a jun/2026 foram omitidos aqui.) Para conferir, abra o dashboard da Web: os números são os mesmos. Depois de cadastrar, editar ou excluir uma venda (pela Web ou pela CLI), basta rodar o comando de novo.
+
+Códigos de saída: `0` sucesso (mesmo sem vendas); `1` erro da API, API fora do ar ou resposta sem os indicadores esperados (nesse caso nada é impresso pela metade); `3` sem token ou token inválido.
+
+### Endpoint desta issue
+
+Exige `Authorization: Bearer <token da CLI>`; sem token, com token inválido ou com token da Web responde `401`.
+
+| Método | Rota | Resposta |
+|---|---|---|
+| GET | `/api/cli/dashboard` | `200` com `resumo`, `faturamento_por_mes`, `faturamento_por_categoria` e `top_produtos` (mesmo formato de `/api/web/dashboard`) |
+
+As consultas SQL são próprias da CLI (`indicadores_dashboard_cli` no `db.py`), com as mesmas regras e as mesmas constantes da Web (`MESES_DASHBOARD = 12`, `TOP_PRODUTOS_DASHBOARD = 5`), numa transação `REPEATABLE READ` e somente leitura: o resumo e os 3 indicadores sempre se referem às mesmas vendas. O JSON é montado pela mesma função da Web (`indicadores_para_json` no `api.py`), com os valores em reais pela regra única `valor_json`.
+
+```bash
+curl -s http://localhost:8080/api/cli/dashboard -H "Authorization: Bearer $TOKEN_CLI"
+```
+
+### Logs
+
+Cada consulta registra uma linha na camada `api` e outra na camada `db`, com `client: "cli"`, `operation: "dashboard"` e o mesmo `request_id`. A `message` traz só a quantidade de vendas consideradas (ex.: `Indicadores enviados (6 vendas)` na `api` e `Indicadores calculados sobre 6 vendas` no `db`). Token inválido é recusado antes do banco, com `WARN` só na camada `api`; falha no banco gera `ERROR`. O token nunca vai para o log.
+
+```bash
+docker compose logs api | grep '"client": "cli"' | grep '"operation": "dashboard"'
 ```
 
 ## Logs
