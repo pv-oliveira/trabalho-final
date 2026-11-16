@@ -675,6 +675,97 @@ Cada busca registra uma linha na camada `api` e outra na camada `db`, com `clien
 docker compose logs api | grep '"client": "cli"' | grep buscar_vendas
 ```
 
+## #11 — Exportação CSV pela CLI
+
+O comando `exportar` gera um CSV com **todas** as vendas dos filtros, sem limite de página; sem filtros, exporta todas as vendas cadastradas. Os filtros são os mesmos do `buscar` (#10) e da busca da Web (#4), e o arquivo tem o mesmo formato do CSV da Web (#5): para os mesmos parâmetros, os dois arquivos são idênticos. O comando é protegido (exige o `TOKEN_CLI` obtido com `login`, seção #7) e usa uma rota própria da CLI e uma consulta SQL própria da CLI (`exportar_vendas_cli` no `db.py`). A CLI não acessa o banco: tudo passa pela API.
+
+### Comando
+
+| Subcomando | Rota | O que faz |
+|---|---|---|
+| `exportar [--produto ID] [--categoria NOME] [--data-inicio AAAA-MM-DD] [--data-fim AAAA-MM-DD] [--ordenar CAMPO] [--direcao asc\|desc] [--arquivo CAMINHO]` | `GET /api/cli/records/export` | Exporta as vendas dos filtros em CSV |
+
+- **Filtros**: `--produto`, `--categoria`, `--data-inicio` e `--data-fim`, combinados com **E** e com as mesmas regras do `buscar` (veja a tabela "Filtros disponíveis" da #10). Filtro omitido ou vazio não restringe.
+- **Ordenação**: `--ordenar` e `--direcao`, com as mesmas colunas e os mesmos padrões do `listar` (#9): data mais recente primeiro, com o número da venda desempatando.
+- **Sem paginação**: não há `--pagina` nem `--tamanho`; o arquivo sempre traz todos os resultados.
+- **Destino**: sem `--arquivo` (`-a`), o CSV vai para a saída padrão; com `--arquivo`, é gravado no caminho dado, **dentro do contêiner**. O resumo ("N vendas exportadas para …") e os erros vão para o stderr, então nunca se misturam ao CSV.
+
+### Como acessar o arquivo gerado
+
+A CLI roda num contêiner, então o arquivo precisa chegar ao host. Há duas formas.
+
+**1. Saída redirecionada no host (recomendada).** O CSV sai no stdout e o shell do host grava o arquivo na pasta atual. Use `-T`: sem ele, o Docker abre um terminal virtual, que troca as quebras de linha e estraga o arquivo.
+
+```bash
+export TOKEN_CLI='<token impresso pelo login>'   # veja a seção #7
+docker compose run --rm -T cli exportar > vendas.csv
+ls -l vendas.csv     # o arquivo está na pasta atual do host
+```
+
+Se a API recusar algum parâmetro, o erro aparece no terminal e o código de saída é diferente de `0`, mas o shell já criou `vendas.csv` vazio. Para não sobrar um arquivo vazio, grave num arquivo temporário e só renomeie no sucesso: `docker compose run --rm -T cli exportar > tmp.csv && mv tmp.csv vendas.csv`.
+
+**2. Volume montado.** Monte uma pasta do host no contêiner e use `--arquivo` com um caminho dentro dela. O `--user` faz o arquivo pertencer ao seu usuário do host. Com `--arquivo`, a CLI só grava depois de receber o CSV completo: um erro não cria nem altera o arquivo.
+
+```bash
+docker compose run --rm -v "$PWD:/saida" --user "$(id -u):$(id -g)" cli exportar --arquivo /saida/vendas.csv
+ls -l vendas.csv     # na pasta atual do host
+```
+
+### Exemplos
+
+```bash
+# todas as vendas
+docker compose run --rm -T cli exportar > vendas.csv
+# 1 filtro: vendas de Bebidas
+docker compose run --rm -T cli exportar --categoria Bebidas > bebidas.csv
+# 2 filtros: produto 1 a partir de 01/10/2026
+docker compose run --rm -T cli exportar --produto 1 --data-inicio 2026-10-01 > arroz.csv
+# 3 filtros: Alimentos em outubro de 2026, maiores valores primeiro, num volume montado
+docker compose run --rm -v "$PWD:/saida" --user "$(id -u):$(id -g)" cli exportar \
+  --categoria Alimentos --data-inicio 2026-10-01 --data-fim 2026-10-31 \
+  --ordenar valor_total --direcao desc --arquivo /saida/alimentos-outubro.csv
+```
+
+```text
+$ docker compose run --rm -T cli exportar --categoria Alimentos --data-inicio 2026-10-01 --data-fim 2026-10-31 > alimentos.csv
+2 vendas exportadas para a saída padrão.
+$ cat alimentos.csv
+Nº;Data;Produto;Categoria;Quantidade;Valor unitário;Valor total
+4;12/10/2026;Feijão 1 kg;Alimentos;4;8,50;34,00
+2;05/10/2026;Arroz 5 kg;Alimentos;2;27,90;55,80
+```
+
+O formato é o da #5 (seção "Formato do arquivo"): UTF-8 com BOM, linhas em CRLF, separador `;`, datas em `DD/MM/AAAA` e vírgula decimal, pronto para abrir no Excel em português. Sem nenhuma venda nos filtros, o arquivo traz só a linha de cabeçalho.
+
+Os erros vão para o stderr, sem traceback, com as mesmas mensagens da busca e o nome da opção que causou cada um:
+
+```text
+$ docker compose run --rm -T cli exportar --produto abc --data-inicio 2026-10-31 --data-fim 2026-10-01 > vendas.csv
+Erro: Parâmetros inválidos. (HTTP 400)
+  --data-fim: A data final não pode ser anterior à data inicial.
+  --produto: O produto deve ser o número de um produto do catálogo.
+```
+
+Códigos de saída: `0` sucesso (mesmo sem vendas encontradas); `1` erro da API (filtro ou parâmetro inválido), API fora do ar, resposta que não é o CSV esperado ou falha ao gravar o `--arquivo`; `2` uso incorreto (ex.: `--ordenar preco`); `3` sem token ou token inválido.
+
+### Endpoint desta issue
+
+Exige `Authorization: Bearer <token da CLI>`; sem token, com token inválido ou com token da Web responde `401`.
+
+| Método | Rota | Resposta |
+|---|---|---|
+| GET | `/api/cli/records/export?produto_id=&categoria=&data_inicio=&data_fim=&ordenar=&direcao=` | `200` com o CSV; `400 {"erro", "campos"}` com filtros ou parâmetros inválidos |
+
+Os filtros são validados pela mesma regra da busca (#4/#10) e a ordenação aceita as colunas da listagem da CLI (#9). `pagina` e `tamanho` são ignorados. A resposta `200` tem os mesmos cabeçalhos do CSV da Web: `Content-Type: text/csv; charset=utf-8`, `Content-Disposition: attachment; filename="vendas-AAAAMMDD-HHMMSS.csv"` e `Cache-Control: no-store`. A consulta SQL é própria da exportação CLI (`exportar_vendas_cli`): o mesmo `JOIN` e as mesmas condições da busca da CLI (`CONDICOES_BUSCA_CLI`), sem `LIMIT`/`OFFSET`, numa transação somente leitura. Os valores vão como parâmetros, então o texto enviado nunca entra no SQL.
+
+### Logs
+
+Cada exportação registra uma linha na camada `api` e outra na camada `db`, com `client: "cli"`, `operation: "exportar_vendas"` e o mesmo `request_id`. A `message` traz a quantidade de vendas e os nomes dos filtros usados (ex.: `5 vendas exportadas em vendas-20261116-143000.csv (categoria, data_inicio)` na `api` e `5 vendas lidas para exportação (categoria, data_inicio)` no `db`). Filtros ou parâmetros inválidos são recusados antes do banco, com `WARN` só na camada `api`; falha no banco gera `ERROR`. O token nunca vai para o log.
+
+```bash
+docker compose logs api | grep '"client": "cli"' | grep exportar_vendas
+```
+
 ## Logs
 
 Cada evento é uma linha JSON no stdout, com `timestamp`, `level`, `layer` (`api`/`db`), `client` (`web`/`cli`), `operation`, `status`, `request_id` e `message`. API e banco compartilham o mesmo `request_id` dentro de uma requisição (também devolvido no header `X-Request-ID`). A inicialização do banco usa `client: "sistema"` e `request_id: "inicializacao"`. Erros não previstos na API viram `500 {"erro": "Erro interno"}` com log `ERROR`. Nas rotas `/api/*`, rota inexistente e método não permitido também respondem em JSON (`404 {"erro": "Rota não encontrada"}`, `405 {"erro": "Método não permitido"}`, este com o header `Allow`), com log `WARN` e o `client` da rota (`cli` em `/api/cli/*`).
