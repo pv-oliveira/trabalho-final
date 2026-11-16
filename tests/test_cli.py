@@ -370,7 +370,11 @@ def test_cabecalho_recusado_nao_expoe_o_token(monkeypatch, capsys):
 
 
 class _RespostaFixa(io.BytesIO):
-    """Resposta HTTP 200 com o corpo dado, usável no `with` como a de `urlopen`."""
+    """Resposta HTTP 200 com o corpo e o Content-Type dados, usável no `with` como a de `urlopen`."""
+
+    def __init__(self, corpo, tipo="application/json"):
+        super().__init__(corpo)
+        self.headers = {"Content-Type": tipo}
 
     def __enter__(self):
         return self

@@ -12,11 +12,14 @@ Execução (via Docker Compose, sem instalar nada no host):
     TOKEN_CLI=<token> docker compose run --rm cli listar --pagina 2 --tamanho 10 --ordenar valor_total --direcao asc
     TOKEN_CLI=<token> docker compose run --rm cli excluir 7
     TOKEN_CLI=<token> docker compose run --rm cli buscar --categoria Bebidas --data-inicio 2026-10-01 --data-fim 2026-10-31
+    TOKEN_CLI=<token> docker compose run --rm -T cli exportar --categoria Bebidas > vendas.csv
 """
 
 import argparse
+import csv
 import getpass
 import http.client
+import io
 import json
 import os
 import sys
@@ -132,9 +135,12 @@ def token_do_ambiente():
     return token
 
 
-def requisitar(metodo, caminho, corpo=None, token=None):
-    """Chama `/api/cli<caminho>` e retorna o JSON da resposta. Lança ErroDaApi ou ApiIndisponivel."""
-    cabecalhos = {"Accept": "application/json"}
+def _enviar(metodo, caminho, corpo=None, token=None, aceitar="application/json"):
+    """Chama `/api/cli<caminho>` e retorna (corpo da resposta em bytes, Content-Type).
+
+    Lança ErroDaApi (com o JSON de erro da API) ou ApiIndisponivel.
+    """
+    cabecalhos = {"Accept": aceitar}
     dados = None
     if corpo is not None:
         dados = json.dumps(corpo).encode("utf-8")
@@ -147,6 +153,7 @@ def requisitar(metodo, caminho, corpo=None, token=None):
         )
         with abrir_url(requisicao) as resposta:
             conteudo = resposta.read()
+            tipo = resposta.headers.get("Content-Type", "")
     except urllib.error.HTTPError as erro:
         with erro:
             try:
@@ -160,6 +167,12 @@ def requisitar(metodo, caminho, corpo=None, token=None):
     except ValueError:
         # URL_API inválida ou cabeçalho recusado. Sem str(erro): a mensagem do Python repete o cabeçalho, com o token.
         raise ApiIndisponivel("URL ou requisição inválida") from None
+    return conteudo, tipo
+
+
+def requisitar(metodo, caminho, corpo=None, token=None):
+    """Chama `/api/cli<caminho>` e retorna o JSON da resposta. Lança ErroDaApi ou ApiIndisponivel."""
+    conteudo, _tipo = _enviar(metodo, caminho, corpo, token)
     try:
         resultado = json.loads(conteudo.decode("utf-8"))
     except ValueError:
@@ -365,19 +378,66 @@ def descrever_filtros(filtros):
     return ", ".join(partes) or "nenhum (todas as vendas)"
 
 
+def _parametros_de_filtros(argumentos):
+    """Filtros informados em `buscar` e `exportar` (os omitidos não restringem a busca)."""
+    return {campo: getattr(argumentos, campo) for campo in OPCOES_BUSCA if getattr(argumentos, campo) is not None}
+
+
 def comando_buscar(argumentos):
     """Comando protegido: GET /api/cli/records/search, com os filtros, a página e a ordenação na query string.
 
     Os filtros são os mesmos da busca da Web (#4) e são combinados com E; quem valida é a API.
     """
-    parametros = {
-        campo: getattr(argumentos, campo) for campo in OPCOES_BUSCA if getattr(argumentos, campo) is not None
-    }
+    parametros = _parametros_de_filtros(argumentos)
     parametros.update(_parametros_de_pagina(argumentos))
     caminho = "/records/search" + (f"?{urllib.parse.urlencode(parametros)}" if parametros else "")
     corpo = requisitar("GET", caminho, token=token_do_ambiente())
     print(f"Filtros: {descrever_filtros(corpo['filtros'])}")
     _mostrar_pagina(corpo, "Nenhuma venda encontrada com esses filtros.", ("venda encontrada", "vendas encontradas"))
+    return SAIDA_SUCESSO
+
+
+def contar_vendas_do_csv(conteudo):
+    """Número de vendas do CSV da API (linhas sem o cabeçalho). Lança ApiIndisponivel se não for o CSV esperado."""
+    try:
+        linhas = list(csv.reader(io.StringIO(conteudo.decode("utf-8-sig"), newline=""), delimiter=";"))
+    except (UnicodeDecodeError, csv.Error):
+        raise ApiIndisponivel("o CSV recebido é inválido") from None
+    if not linhas or linhas[0][:1] != ["Nº"]:
+        raise ApiIndisponivel("o CSV recebido não tem o cabeçalho esperado")
+    return len(linhas) - 1
+
+
+def comando_exportar(argumentos):
+    """Comando protegido: GET /api/cli/records/export, com os filtros e a ordenação na query string.
+
+    Exporta todas as vendas dos filtros, sem paginação, no mesmo CSV da Web (#5). O arquivo vai para
+    o stdout (para redirecionar no host) ou para --arquivo; o resumo vai para o stderr.
+    """
+    parametros = _parametros_de_filtros(argumentos)
+    parametros.update(
+        (campo, valor) for campo, valor in (("ordenar", argumentos.ordenar), ("direcao", argumentos.direcao)) if valor
+    )
+    caminho = "/records/export" + (f"?{urllib.parse.urlencode(parametros)}" if parametros else "")
+    conteudo, tipo = _enviar("GET", caminho, token=token_do_ambiente(), aceitar="text/csv")
+    if not tipo.startswith("text/csv"):
+        raise ApiIndisponivel("a resposta não é CSV")
+    total = contar_vendas_do_csv(conteudo)
+    # Só grava depois da resposta completa e válida: um erro da API nunca deixa um arquivo vazio ou cortado.
+    if argumentos.arquivo:
+        try:
+            with open(argumentos.arquivo, "wb") as arquivo:
+                arquivo.write(conteudo)
+        except OSError as erro:
+            print(f"Erro: não foi possível gravar {argumentos.arquivo} ({erro.strerror or erro}).", file=sys.stderr)
+            return SAIDA_ERRO
+        destino = argumentos.arquivo
+    else:
+        sys.stdout.flush()
+        sys.stdout.buffer.write(conteudo)  # bytes da API, sem mudar o BOM nem o CRLF
+        sys.stdout.buffer.flush()
+        destino = "a saída padrão"
+    print(f"{_quantidade(total, 'venda exportada', 'vendas exportadas')} para {destino}.", file=sys.stderr)
     return SAIDA_SUCESSO
 
 
@@ -413,10 +473,32 @@ def _adicionar_campos_venda(parser):
     obrigatorias.add_argument("--data", required=True, metavar="AAAA-MM-DD", help="data da venda, que não pode ser futura")
 
 
+def _adicionar_filtros_busca(parser):
+    """Os 4 filtros opcionais de `buscar` e `exportar`, os mesmos da busca da Web (#4)."""
+    filtros = parser.add_argument_group("filtros (opcionais, combinados com E)")
+    filtros.add_argument(
+        "--produto", dest="produto_id", metavar="ID", help="id do produto (veja o comando 'produtos')"
+    )
+    filtros.add_argument(
+        "--categoria",
+        metavar="NOME",
+        help="nome exato da categoria, com a inicial maiúscula (ex.: Alimentos, Bebidas, Higiene, Limpeza)",
+    )
+    filtros.add_argument("--data-inicio", metavar="AAAA-MM-DD", help="vendas a partir desta data, inclusive")
+    filtros.add_argument(
+        "--data-fim", metavar="AAAA-MM-DD", help="vendas até esta data, inclusive (não pode ser anterior à inicial)"
+    )
+
+
 def _adicionar_opcoes_pagina(parser):
     """Opções de página e ordenação de `listar` e `buscar`, com os mesmos padrões da API."""
     parser.add_argument("--pagina", metavar="N", help="número da página (padrão: 1)")
     parser.add_argument("--tamanho", metavar="N", help="vendas por página, de 1 a 100 (padrão: 10)")
+    _adicionar_opcoes_ordenacao(parser)
+
+
+def _adicionar_opcoes_ordenacao(parser):
+    """Opções de ordenação de `listar`, `buscar` e `exportar`, com os mesmos padrões da API."""
     parser.add_argument(
         "--ordenar", choices=COLUNAS_ORDENACAO, metavar="CAMPO",
         help=f"campo da ordenação: {', '.join(COLUNAS_ORDENACAO)} (padrão: data_venda)",
@@ -512,21 +594,27 @@ def criar_parser():
         ),
     )
     _traduzir_ajuda(buscar)
-    filtros = buscar.add_argument_group("filtros (opcionais, combinados com E)")
-    filtros.add_argument(
-        "--produto", dest="produto_id", metavar="ID", help="id do produto (veja o comando 'produtos')"
-    )
-    filtros.add_argument(
-        "--categoria",
-        metavar="NOME",
-        help="nome exato da categoria, com a inicial maiúscula (ex.: Alimentos, Bebidas, Higiene, Limpeza)",
-    )
-    filtros.add_argument("--data-inicio", metavar="AAAA-MM-DD", help="vendas a partir desta data, inclusive")
-    filtros.add_argument(
-        "--data-fim", metavar="AAAA-MM-DD", help="vendas até esta data, inclusive (não pode ser anterior à inicial)"
-    )
+    _adicionar_filtros_busca(buscar)
     _adicionar_opcoes_pagina(buscar)
     buscar.set_defaults(funcao=comando_buscar)
+
+    exportar = subcomandos.add_parser(
+        "exportar",
+        help="exporta as vendas em CSV, com filtros combináveis (protegido)",
+        description=(
+            "Exporta em CSV todas as vendas dos filtros (combinados com E), sem limite de página; sem "
+            "filtros, exporta todas as vendas. O CSV vai para a saída padrão, para redirecionar no host "
+            "(docker compose run --rm -T cli exportar > vendas.csv), ou para --arquivo."
+        ),
+    )
+    _traduzir_ajuda(exportar)
+    _adicionar_filtros_busca(exportar)
+    _adicionar_opcoes_ordenacao(exportar)
+    exportar.add_argument(
+        "-a", "--arquivo", metavar="CAMINHO",
+        help="grava o CSV neste arquivo em vez da saída padrão (no contêiner: use um volume montado)",
+    )
+    exportar.set_defaults(funcao=comando_exportar)
 
     excluir = subcomandos.add_parser(
         "excluir",
