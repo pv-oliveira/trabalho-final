@@ -1,9 +1,17 @@
-# trabalho-final
+# Trabalho final
 
 CRUD de vendas de produtos com **Web + CLI** sobre a mesma API REST e o mesmo banco.
 Tudo roda via **Docker Compose** — no host basta Docker, Docker Compose, navegador e terminal.
 
 Especificação do projeto: [`docs/especificacao.md`](docs/especificacao.md).
+
+## Integrantes
+
+- 2518007 Moisés Martins Bezerra Fonteles
+
+- 2650488 Paulo Victor Morais Oliveira
+
+- 2650668 Tibet Brasil Teixeira
 
 ## Stack
 
